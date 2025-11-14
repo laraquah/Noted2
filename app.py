@@ -28,7 +28,6 @@ from docx.shared import Pt, Inches
 
 # -----------------------------------------------------
 # 1. CONSTANTS & CONFIGURATION
-#    (We now load these from st.secrets)
 # -----------------------------------------------------
 
 # --- Google Config ---
@@ -50,11 +49,9 @@ BASECAMP_USER_AGENT = {"User-Agent": "AI Meeting Notes App (your-email@example.c
 
 
 # -----------------------------------------------------
-# 2. API CLIENTS SETUP (NOW USING ST.SECRETS)
+# 2. API CLIENTS SETUP
 # -----------------------------------------------------
 try:
-    # Get the service account JSON from secrets
-    # st.secrets["GCP_SERVICE_ACCOUNT_JSON"] will be the full text of your credentials.json
     sa_creds_info = json.loads(st.secrets["GCP_SERVICE_ACCOUNT_JSON"])
     sa_creds = service_account.Credentials.from_service_account_info(sa_creds_info)
     
@@ -79,7 +76,7 @@ def get_drive_service():
     Google Drive credentials.
     """
     try:
-        # Get client secret info and refresh token from secrets
+        # Get client secret info and refresh token
         client_config_str = st.secrets["GDRIVE_CLIENT_SECRET_JSON"] # This will be the full text of client_secret.json
         client_config = json.loads(client_config_str)
         refresh_token = st.secrets["GDRIVE_REFRESH_TOKEN"]
