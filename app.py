@@ -412,6 +412,11 @@ def get_structured_notes_google(audio_file_path, file_name, participants_context
         if not full_transcript_text.strip():
             full_transcript_text = " ".join([result.alternatives[0].transcript for result in response.results])
 
+        # --- NEW ERROR CHECK 1 ---
+        if not full_transcript_text.strip():
+            return {"error": "Transcription succeeded but produced an empty transcript."}
+        # --- END CHECK ---
+
         # 4. Summarize (The Smart Part)
         with st.spinner("Analyzing conversation & matching names..."):
             
@@ -457,7 +462,18 @@ def get_structured_notes_google(audio_file_path, file_name, participants_context
             """
             
             response = gemini_model.generate_content(prompt)
-            text = response.text
+            
+            # --- NEW ERROR CHECK 2 ---
+            try:
+                text = response.text
+            except Exception as e:
+                st.error(f"Gemini AI error: {e}")
+                st.error("This usually means the GOOGLE_API_KEY is invalid or the Gemini API blocked the response for safety reasons.")
+                return {"error": "Failed to get a response from the AI."}
+            
+            if not text.strip():
+                return {"error": "AI analysis succeeded but returned an empty response."}
+            # --- END CHECK ---
             
             # Robust Parsing
             discussion = ""
@@ -512,7 +528,6 @@ def get_structured_notes_google(audio_file_path, file_name, participants_context
             blob = bucket.blob(flac_blob_name)
             blob.delete()
         except: pass
-
 # -----------------------------------------------------
 # 5. STREAMLIT UI
 # -----------------------------------------------------
