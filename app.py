@@ -32,8 +32,9 @@ from docx.shared import Pt, Inches
 # -----------------------------------------------------
 
 # --- Google Config ---
-GCS_BUCKET_NAME = st.secrets.get("GCS_BUCKET_NAME", "default-bucket-name")
-DRIVE_FOLDER_ID = st.secrets.get("DRIVE_FOLDER_ID", "default-folder-id")
+# This code is already in your app.py
+GCS_BUCKET_NAME = st.secrets.get("GCS_BUCKET_NAME", "ai-notes-app-laraq-18")
+DRIVE_FOLDER_ID = st.secrets.get("DRIVE_FOLDER_ID", "1YydKO-bAs-4WhiBJ0iAwuQNf3j_ElYTX")
 GOOGLE_API_KEY = st.secrets["GOOGLE_API_KEY"]
 
 # --- Basecamp Config ---
