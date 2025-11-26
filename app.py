@@ -102,6 +102,9 @@ with st.sidebar:
             st.rerun()
     else:
         try:
+            # Identify if installed or web config
+            config_key = "installed" if "installed" in GDRIVE_CLIENT_CONFIG else "web"
+            
             flow = Flow.from_client_config(
                 GDRIVE_CLIENT_CONFIG,
                 scopes=["https://www.googleapis.com/auth/drive"],
@@ -142,13 +145,18 @@ with st.sidebar:
         
         if bc_code:
             try:
-                token = bc_oauth.fetch_token(
-                    BASECAMP_TOKEN_URL,
-                    client_id=BASECAMP_CLIENT_ID,
-                    client_secret=BASECAMP_CLIENT_SECRET,
-                    code=bc_code,
-                    type="web_server"
-                )
+                # Use direct request to ensure client_id is sent
+                payload = {
+                    "type": "web_server",
+                    "client_id": BASECAMP_CLIENT_ID,
+                    "client_secret": BASECAMP_CLIENT_SECRET,
+                    "redirect_uri": BASECAMP_REDIRECT_URI,
+                    "code": bc_code
+                }
+                response = requests.post(BASECAMP_TOKEN_URL, data=payload)
+                response.raise_for_status()
+                token = response.json()
+                
                 st.session_state.basecamp_token = token
                 
                 # --- AUTO-FETCH NAME ---
@@ -198,7 +206,7 @@ def upload_to_drive_user(file_stream, file_name):
     if not st.session_state.gdrive_creds: return None
     try:
         service = build("drive", "v3", credentials=st.session_state.gdrive_creds)
-        file_metadata = {"name": file_name} 
+        file_metadata = {"name": file_name} # Uploads to Root Folder
         media = MediaIoBaseUpload(
             file_stream, mimetype="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
         )
@@ -458,7 +466,6 @@ with tab2:
     with row2:
         time_obj = st.text_input("Time", value=sg_now.strftime("%I:%M %p"))
         # --- AUTO FILL PREPARED BY ---
-        # We check session state for the Basecamp name first
         default_prepared = st.session_state.user_real_name if "user_real_name" in st.session_state else ""
         prepared_by = st.text_input("Prepared by", value=default_prepared)
         ifoundries_rep = st.text_input("iFoundries Reps", value=st.session_state.auto_ifoundries_reps)
