@@ -8,7 +8,7 @@ import subprocess
 import pickle
 import json
 import datetime
-import pytz # --- NEW IMPORT for Timezones ---
+import pytz
 
 # Import Google Cloud Libraries
 from google.cloud import speech
@@ -17,8 +17,7 @@ import google.generativeai as genai
 
 # Import Google Auth & Drive Libraries
 from google.oauth2.credentials import Credentials
-from google_auth_oauthlib.flow import InstalledAppFlow 
-from google.auth.transport.requests import Request
+from google_auth_oauthlib.flow import Flow
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseUpload
 from google.oauth2 import service_account
@@ -30,112 +29,129 @@ from docx.shared import Pt, Inches
 
 # -----------------------------------------------------
 # 1. CONSTANTS & CONFIGURATION
-#    (Loaded from st.secrets)
 # -----------------------------------------------------
+st.set_page_config(layout="wide", page_title="AI Meeting Manager")
 
-# --- Google Config ---
-GCS_BUCKET_NAME = st.secrets.get("GCS_BUCKET_NAME", "ai-notes-app-laraq-18")
-DRIVE_FOLDER_ID = st.secrets.get("DRIVE_FOLDER_ID", "1YydKO-bAs-4WhiBJ0iAwuQNf3j_ElYTX")
-GOOGLE_API_KEY = st.secrets["GOOGLE_API_KEY"]
+# --- Load App Keys from Secrets ---
+try:
+    # 1. AI Robot Credentials (Shared)
+    GCS_BUCKET_NAME = st.secrets["GCS_BUCKET_NAME"]
+    GOOGLE_API_KEY = st.secrets["GOOGLE_API_KEY"]
+    # We parse the JSON string back into a dictionary
+    GCP_SERVICE_ACCOUNT_JSON = json.loads(st.secrets["GCP_SERVICE_ACCOUNT_JSON"])
+    
+    # 2. App Identifiers (For User Login)
+    GDRIVE_CLIENT_CONFIG = json.loads(st.secrets["GDRIVE_CLIENT_SECRET_JSON"])
+    BASECAMP_CLIENT_ID = st.secrets["BASECAMP_CLIENT_ID"]
+    BASECAMP_CLIENT_SECRET = st.secrets["BASECAMP_CLIENT_SECRET"]
+    BASECAMP_ACCOUNT_ID = st.secrets["BASECAMP_ACCOUNT_ID"]
 
-# --- Basecamp Config ---
-BASECAMP_ACCOUNT_ID = st.secrets["BASECAMP_ACCOUNT_ID"]
-BASECAMP_CLIENT_ID = st.secrets["BASECAMP_CLIENT_ID"]
-BASECAMP_CLIENT_SECRET = st.secrets["BASECAMP_CLIENT_SECRET"]
-YOUR_PERMANENT_REFRESH_TOKEN = st.secrets["BASECAMP_REFRESH_TOKEN"]
+except Exception as e:
+    st.error(f"Secrets Configuration Error: {e}")
+    st.stop()
 
-# Basecamp API URLs
+# URLs
+BASECAMP_AUTH_URL = "https://launchpad.37signals.com/authorization/new"
 BASECAMP_TOKEN_URL = "https://launchpad.37signals.com/authorization/token"
 BASECAMP_API_BASE = f"https://3.basecampapi.com/{BASECAMP_ACCOUNT_ID}"
-BASECAMP_USER_AGENT = {"User-Agent": "AI Meeting Notes App (your-email@example.com)"}
-
+BASECAMP_USER_AGENT = {"User-Agent": "AI Meeting Notes App (external-user)"}
+BASECAMP_REDIRECT_URI = "https://google.com" 
 
 # -----------------------------------------------------
-# 2. API CLIENTS SETUP
+# 2. USER LOGIN FLOW (SIDEBAR)
+# -----------------------------------------------------
+
+if 'gdrive_creds' not in st.session_state:
+    st.session_state.gdrive_creds = None
+if 'basecamp_token' not in st.session_state:
+    st.session_state.basecamp_token = None
+
+with st.sidebar:
+    st.header("🔐 Login")
+    st.info("Log in to upload to **YOUR** accounts.")
+
+    # --- GOOGLE DRIVE LOGIN ---
+    st.subheader("1. Google Drive")
+    if st.session_state.gdrive_creds:
+        st.success("✅ Connected")
+        if st.button("Logout Drive"):
+            st.session_state.gdrive_creds = None
+            st.rerun()
+    else:
+        try:
+            # Identify if installed or web config
+            config_key = "installed" if "installed" in GDRIVE_CLIENT_CONFIG else "web"
+            
+            flow = Flow.from_client_config(
+                GDRIVE_CLIENT_CONFIG,
+                scopes=["https://www.googleapis.com/auth/drive"],
+                redirect_uri="urn:ietf:wg:oauth:2.0:oob"
+            )
+            auth_url, _ = flow.authorization_url(prompt='consent')
+            
+            st.markdown(f"[**Click to Authorize Google Drive**]({auth_url})")
+            g_code = st.text_input("Paste Google Code:", key="g_code")
+            
+            if g_code:
+                flow.fetch_token(code=g_code)
+                st.session_state.gdrive_creds = flow.credentials
+                st.rerun()
+        except Exception as e:
+            st.error(f"Config Error: {e}")
+
+    st.divider()
+
+    # --- BASECAMP LOGIN ---
+    st.subheader("2. Basecamp")
+    if st.session_state.basecamp_token:
+        st.success("✅ Connected")
+        if st.button("Logout Basecamp"):
+            st.session_state.basecamp_token = None
+            st.rerun()
+    else:
+        bc_oauth = OAuth2Session(BASECAMP_CLIENT_ID, redirect_uri=BASECAMP_REDIRECT_URI)
+        bc_auth_url, _ = bc_oauth.authorization_url(BASECAMP_AUTH_URL, type="web_server")
+        
+        st.markdown(f"[**Click to Authorize Basecamp**]({bc_auth_url})")
+        st.caption("You will be redirected to Google. Copy the code from the URL bar (after `code=`).")
+        bc_code = st.text_input("Paste Basecamp Code:", key="bc_code")
+        
+        if bc_code:
+            try:
+                token = bc_oauth.fetch_token(
+                    BASECAMP_TOKEN_URL,
+                    client_secret=BASECAMP_CLIENT_SECRET,
+                    code=bc_code,
+                    type="web_server"
+                )
+                st.session_state.basecamp_token = token
+                st.rerun()
+            except Exception as e:
+                st.error(f"Login failed: {e}")
+
+# -----------------------------------------------------
+# 3. API CLIENTS (ROBOT) SETUP
 # -----------------------------------------------------
 try:
-    sa_creds_info = json.loads(st.secrets["GCP_SERVICE_ACCOUNT_JSON"])
-    sa_creds = service_account.Credentials.from_service_account_info(sa_creds_info)
+    sa_creds = service_account.Credentials.from_service_account_info(GCP_SERVICE_ACCOUNT_JSON)
     storage_client = storage.Client(credentials=sa_creds)
     speech_client = speech.SpeechClient(credentials=sa_creds)
-except Exception as e:
-    st.error(f"FATAL ERROR: Could not load Google Cloud credentials from secrets. Error: {e}")
-    st.stop()
-
-try:
+    
     genai.configure(api_key=GOOGLE_API_KEY)
-    gemini_model = genai.GenerativeModel('gemini-flash-latest') 
+    gemini_model = genai.GenerativeModel('gemini-flash-latest')
 except Exception as e:
-    st.error(f"Error initializing Gemini. Is your GOOGLE_API_KEY correct? Error: {e}")
+    st.error(f"System Error (AI Services): {e}")
     st.stop()
 
-# --- Google Drive Service ---
-@st.cache_resource
-def get_drive_service():
-    try:
-        client_config_str = st.secrets["GDRIVE_CLIENT_SECRET_JSON"]
-        client_config = json.loads(client_config_str)
-        refresh_token = st.secrets["GDRIVE_REFRESH_TOKEN"]
-        creds_data = client_config["installed"] 
-        creds = Credentials.from_authorized_user_info(
-            {
-                "client_id": creds_data["client_id"],
-                "client_secret": creds_data["client_secret"],
-                "refresh_token": refresh_token,
-                "token_uri": creds_data["token_uri"],
-            }
-        )
-        if not creds.valid:
-            if creds.expired and creds.refresh_token:
-                creds.refresh(Request())
-            else:
-                st.error("Error with Google Drive credentials. Please re-generate refresh token.")
-                st.stop()
-        return build("drive", "v3", credentials=creds)
-    except Exception as e:
-        st.error(f"FATAL ERROR: Could not load Google Drive credentials. Error: {e}")
-        st.stop()
-
-drive_service = get_drive_service()
-
-
-# --- Basecamp Service ---
-@st.cache_resource
-def get_basecamp_session():
-    token_pickle_path = "/tmp/basecamp_token.pickle"
-    token = None
-    if os.path.exists(token_pickle_path):
-        with open(token_pickle_path, "rb") as f:
-            token = pickle.load(f)
-
-    if token and time.time() < token.get("expires_at", 0):
-        session = OAuth2Session(BASECAMP_CLIENT_ID, token=token)
-        session.headers.update(BASECAMP_USER_AGENT)
-        return session
-
-    st.info("Refreshing Basecamp authorization...")
-    try:
-        oauth = OAuth2Session(BASECAMP_CLIENT_ID)
-        new_token = oauth.refresh_token(
-            BASECAMP_TOKEN_URL, 
-            client_id=BASECAMP_CLIENT_ID,
-            client_secret=BASECAMP_CLIENT_SECRET,
-            refresh_token=YOUR_PERMANENT_REFRESH_TOKEN,
-            type="refresh"
-        )
-        with open(token_pickle_path, "wb") as f:
-            pickle.dump(new_token, f)
-        session = OAuth2Session(BASECAMP_CLIENT_ID, token=new_token)
-        session.headers.update(BASECAMP_USER_AGENT)
-        st.success("Basecamp is connected.")
-        return session
-    except Exception as e:
-        st.error(f"Error refreshing Basecamp token: {e}")
-        st.stop()
-
 # -----------------------------------------------------
-# 3. HELPER FUNCTIONS
+# 4. HELPER FUNCTIONS
 # -----------------------------------------------------
+
+def get_basecamp_session_user():
+    if not st.session_state.basecamp_token: return None
+    session = OAuth2Session(BASECAMP_CLIENT_ID, token=st.session_state.basecamp_token)
+    session.headers.update(BASECAMP_USER_AGENT)
+    return session
 
 def upload_to_gcs(file_path, destination_blob_name):
     try:
@@ -147,13 +163,15 @@ def upload_to_gcs(file_path, destination_blob_name):
         st.error(f"GCS Upload Error: {e}")
         return None
 
-def upload_to_drive(file_stream, file_name):
+def upload_to_drive_user(file_stream, file_name):
+    if not st.session_state.gdrive_creds: return None
     try:
-        file_metadata = {"name": file_name, "parents": [DRIVE_FOLDER_ID]}
+        service = build("drive", "v3", credentials=st.session_state.gdrive_creds)
+        file_metadata = {"name": file_name} # Uploads to Root Folder
         media = MediaIoBaseUpload(
             file_stream, mimetype="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
         )
-        file = drive_service.files().create(
+        file = service.files().create(
             body=file_metadata, media_body=media, fields="id"
         ).execute()
         return file.get("id")
@@ -161,127 +179,44 @@ def upload_to_drive(file_stream, file_name):
         st.error(f"Google Drive Upload Error: {e}")
         return None
 
-@st.cache_data(ttl=600)
 def get_basecamp_projects(_session):
-    if not _session: return []
     try:
         response = _session.get(f"{BASECAMP_API_BASE}/projects.json")
         response.raise_for_status()
-        projects = response.json()
-        return sorted([(p['name'], p['id']) for p in projects if p['status'] == 'active'], key=lambda x: x[0])
-    except Exception as e:
-        st.error(f"Error fetching Basecamp projects: {e}")
-        return []
+        return sorted([(p['name'], p['id']) for p in response.json() if p['status'] == 'active'], key=lambda x: x[0])
+    except: return []
 
-@st.cache_data(ttl=600)
 def get_basecamp_todolists(_session, project_id):
-    if not _session or not project_id: return []
     try:
-        project_response = _session.get(f"{BASECAMP_API_BASE}/projects/{project_id}.json")
-        project_response.raise_for_status()
-        project_data = project_response.json()
-        
-        todoset_id = None
-        for tool in project_data.get('dock', []):
-            if tool.get('name') == 'todoset' and tool.get('enabled') == True:
-                todoset_id = tool.get('id')
-                break
-        
-        if not todoset_id:
-            st.error("Could not find an enabled 'To-do' list tool in this project.")
-            return []
-
-        todolists_url = f"{BASECAMP_API_BASE}/buckets/{project_id}/todosets/{todoset_id}/todolists.json"
-        response = _session.get(todolists_url)
-        response.raise_for_status()
-        todolists = response.json()
-        return sorted([(tl['title'], tl['id']) for tl in todolists], key=lambda x: x[0])
-    except Exception as e:
-        st.error(f"Error fetching Basecamp to-do lists: {e}")
-        return []
+        project_resp = _session.get(f"{BASECAMP_API_BASE}/projects/{project_id}.json").json()
+        todoset_id = next((t['id'] for t in project_resp.get('dock', []) if t['name'] == 'todoset' and t['enabled']), None)
+        if not todoset_id: return []
+        lists = _session.get(f"{BASECAMP_API_BASE}/buckets/{project_id}/todosets/{todoset_id}/todolists.json").json()
+        return sorted([(tl['title'], tl['id']) for tl in lists], key=lambda x: x[0])
+    except: return []
 
 def upload_bc_attachment(_session, file_bytes, file_name):
-    if not _session: return None
     try:
         headers = _session.headers.copy()
-        headers['Content-Type'] = 'application/octet-stream'
-        headers['Content-Length'] = str(len(file_bytes))
-        upload_response = _session.post(
-            f"{BASECAMP_API_BASE}/attachments.json?name={file_name}",
-            data=file_bytes,
-            headers=headers
-        )
-        upload_response.raise_for_status()
-        response_json = upload_response.json()
-        return response_json['attachable_sgid']
-    except KeyError:
-        st.error("Basecamp Upload Error: 'attachable_sgid' key not found in response.")
-        return None
+        headers.update({'Content-Type': 'application/octet-stream', 'Content-Length': str(len(file_bytes))})
+        resp = _session.post(f"{BASECAMP_API_BASE}/attachments.json?name={file_name}", data=file_bytes, headers=headers)
+        return resp.json()['attachable_sgid']
     except Exception as e:
         st.error(f"Basecamp Upload Error: {e}")
         return None
 
 def create_bc_todo(_session, project_id, todolist_id, title, attachment_sgid):
-    if not _session: return False
     try:
-        content_html = title
-        description_html = "" 
-        if attachment_sgid:
-            attachment_html = f'<bc-attachment sgid="{attachment_sgid}"></bc-attachment>'
-            description_html = attachment_html 
-        payload = {
-            "content": content_html,
-            "description": description_html,
-        }
+        content = title
+        desc = f'<bc-attachment sgid="{attachment_sgid}"></bc-attachment>' if attachment_sgid else ""
+        payload = {"content": content, "description": desc}
         url = f"{BASECAMP_API_BASE}/buckets/{project_id}/todolists/{todolist_id}/todos.json"
-        response = _session.post(url, json=payload)
-        response.raise_for_status()
+        _session.post(url, json=payload).raise_for_status()
         return True
     except Exception as e:
-        st.error(f"Basecamp To-Do Creation Error: {e}")
+        st.error(f"Basecamp Create Error: {e}")
         return False
 
-def add_formatted_text(cell, text):
-    cell.text = ""
-    lines = text.split('\n')
-    for line in lines:
-        line = line.strip()
-        if not line: continue
-        p = cell.add_paragraph()
-        p.paragraph_format.space_before = Pt(0)
-        p.paragraph_format.space_after = Pt(0)
-        
-        if line.startswith('##') and line.endswith('##'):
-            clean_title = line.strip('#').strip()
-            run = p.add_run(clean_title)
-            run.underline = True
-            run.bold = False
-            p.paragraph_format.space_before = Pt(12)
-            p.paragraph_format.space_after = Pt(4)
-        elif line.startswith('*'):
-            clean_text = line.lstrip('*').lstrip("•").strip()
-            if clean_text.startswith('**') and ':**' in clean_text:
-                try:
-                    parts = clean_text.split(':**', 1)
-                    title = parts[0].lstrip('**').strip()
-                    text = parts[1].strip()
-                    p.text = "•\t"
-                    run = p.add_run(f"{title}: ")
-                    run.bold = True
-                    p.add_run(text)
-                    p.paragraph_format.left_indent = Inches(0.25)
-                except:
-                    p.text = f"•\t{clean_text}"
-                    p.paragraph_format.left_indent = Inches(0.25)
-            elif clean_text:
-                p.text = f"•\t{clean_text}" 
-                p.paragraph_format.left_indent = Inches(0.25)
-        else:
-            p.add_run(line)
-
-# -----------------------------------------------------
-# 4. THE MAIN AI FUNCTION
-# -----------------------------------------------------
 def get_structured_notes_google(audio_file_path, file_name, participants_context):
     flac_file_path = ""
     flac_blob_name = ""
@@ -409,220 +344,191 @@ def get_structured_notes_google(audio_file_path, file_name, participants_context
                 "full_transcript": full_transcript_text
             }
     except Exception as e:
-        if 'progress_bar' in locals(): progress_bar.empty()
         return {"error": str(e)}
     finally:
         try:
-            if os.path.exists(audio_file_path): os.remove(audio_file_path)
-            if os.path.exists(flac_file_path): os.remove(flac_file_path)
             bucket = storage_client.bucket(GCS_BUCKET_NAME)
-            blob = bucket.blob(flac_blob_name)
-            blob.delete()
+            bucket.blob(flac_blob_name).delete()
         except: pass
 
-# -----------------------------------------------------
-# 5. STREAMLIT UI
-# -----------------------------------------------------
-st.set_page_config(layout="wide", page_title="AI Meeting Manager")
-st.title("🤖 AI Meeting Manager")
+def add_formatted_text(cell, text):
+    cell.text = ""
+    lines = text.split('\n')
+    for line in lines:
+        line = line.strip()
+        if not line: continue
+        p = cell.add_paragraph()
+        p.paragraph_format.space_before = Pt(0)
+        p.paragraph_format.space_after = Pt(0)
+        if line.startswith('##'):
+            run = p.add_run(line.strip('#').strip())
+            run.underline = True
+        elif line.startswith('*'):
+            clean = line.lstrip('*').lstrip("•").strip()
+            if clean.startswith('**') and ':**' in clean:
+                parts = clean.split(':**', 1)
+                p.text = "•\t"
+                p.add_run(parts[0].lstrip('**').strip() + ": ").bold = True
+                p.add_run(parts[1].strip())
+            else:
+                p.text = f"•\t{clean}"
+            p.paragraph_format.left_indent = Inches(0.25)
+        else:
+            p.add_run(line)
 
+# -----------------------------------------------------
+# 6. STREAMLIT UI
+# -----------------------------------------------------
 if 'ai_results' not in st.session_state:
     st.session_state.ai_results = {"discussion": "", "next_steps": "", "client_reqs": "", "full_transcript": ""}
-
 if "chat_history" not in st.session_state:
     st.session_state.chat_history = []
-
-# --- Init Reps State ---
 if "auto_client_reps" not in st.session_state:
     st.session_state.auto_client_reps = ""
 if "auto_ifoundries_reps" not in st.session_state:
     st.session_state.auto_ifoundries_reps = ""
 
-tab1, tab2, tab3 = st.tabs(["1. Analyze Audio", "2. Review & Export", "3. Chat with Meeting"])
+st.title("🤖 AI Meeting Manager")
+
+tab1, tab2, tab3 = st.tabs(["1. Analyze", "2. Review & Export", "3. Chat"])
 
 with tab1:
-    st.header("1. Analyze Audio")
-    participants_input = st.text_area(
-        "Known Participants (Teach the AI)", 
-        value="Client's Exact Name (Client)\niFoundries Exact Name (iFoundries)",
-        help="The AI will read this to match 'Speaker 1' to these names. It will also auto-fill the rep fields in Tab 2!"
-    )
-    uploaded_file = st.file_uploader("Upload Meeting (MP3/MP4)", type=["mp3", "mp4", "m4a", "wav"])
-    
+    participants_input = st.text_area("Known Participants", value="Name (Client)\nName (iFoundries)")
+    uploaded_file = st.file_uploader("Upload Meeting", type=["mp3", "mp4", "m4a", "wav"])
     if st.button("Analyze Audio"):
         if uploaded_file:
             with tempfile.NamedTemporaryFile(delete=False, suffix=f".{uploaded_file.name}") as tmp:
                 tmp.write(uploaded_file.getvalue())
                 path = tmp.name
             
-            st.session_state.chat_history = [] 
-            
-            # --- Auto-Parse Reps ---
-            c_list = []
-            i_list = []
-            for line in participants_input.split('\n'):
-                line = line.strip()
-                if "(Client)" in line:
-                    clean_name = line.replace("(Client)", "").strip()
-                    c_list.append(clean_name)
-                elif "(iFoundries)" in line:
-                    clean_name = line.replace("(iFoundries)", "").strip()
-                    i_list.append(clean_name)
-            
+            # Auto-fill logic
+            c_list = [l.replace("(Client)","").strip() for l in participants_input.split('\n') if "(Client)" in l]
+            i_list = [l.replace("(iFoundries)","").strip() for l in participants_input.split('\n') if "(iFoundries)" in l]
             st.session_state.auto_client_reps = "\n".join(c_list)
             st.session_state.auto_ifoundries_reps = ", ".join(i_list)
-            # --- END Parsing ---
-
-            res = get_structured_notes_google(path, uploaded_file.name, participants_input)
             
-            if "error" in res:
-                st.error(res["error"])
-            else:
+            res = get_structured_notes_google(path, uploaded_file.name, participants_input)
+            if "error" in res: st.error(res["error"])
+            else: 
                 st.session_state.ai_results = res
-                st.success("Done! Review notes in Tab 2 or Chat in Tab 3.")
-        else:
-            st.warning("Please upload a file first.")
+                st.success("Analysis Complete!")
 
 with tab2:
-    st.header("2. Review Notes")
-    
-    st.subheader("Manual Fields (For .docx Template)")
-    row1_col1, row1_col2 = st.columns(2)
-    
-    # --- NEW: Date/Time Logic (Singapore Time) ---
+    # Timezone Setup
     sg_tz = pytz.timezone('Asia/Singapore')
     sg_now = datetime.datetime.now(sg_tz)
     
-    with row1_col1:
-        date_obj = st.date_input("Date :red[*]", sg_now.date())
+    row1, row2 = st.columns(2)
+    with row1:
+        date_obj = st.date_input("Date", sg_now.date())
         venue = st.text_input("Venue")
-        # Auto-filled from session state
-        client_rep = st.text_area("Client Reps :red[*]", value=st.session_state.auto_client_reps, height=70)
+        client_rep = st.text_area("Client Reps", value=st.session_state.auto_client_reps)
         absent = st.text_input("Absent")
-    
-    with row1_col2:
-        # Pre-fill with current SG Time in 12-hour format (e.g. 02:30 PM)
-        time_obj = st.text_input("Time", value=sg_now.strftime("%I:%M %p")) 
-        prepared_by = st.text_input("Prepared by :red[*]")
-        # Auto-filled from session state
+    with row2:
+        time_obj = st.text_input("Time", value=sg_now.strftime("%I:%M %p"))
+        prepared_by = st.text_input("Prepared by")
         ifoundries_rep = st.text_input("iFoundries Reps", value=st.session_state.auto_ifoundries_reps)
     
-    date_str = date_obj.strftime("%d %B %Y") 
-    time_str = time_obj 
-    # --- END NEW UI ---
-
-    st.subheader("AI Generated Content")
+    date_str = date_obj.strftime("%d %B %Y")
+    time_str = time_obj
+    
     discussion_text = st.text_area("Discussion", value=st.session_state.ai_results.get("discussion", ""), height=300)
     next_steps_text = st.text_area("Next Steps", value=st.session_state.ai_results.get("next_steps", ""), height=200)
     with st.expander("View Specific Client Requests"):
         st.text_area("Client Requests", value=st.session_state.ai_results.get("client_reqs", ""), height=150)
-    
-    st.header("3. Generate & Upload")
-    
-    bc_session = None
-    bc_project_id = None
-    bc_todolist_id = None
-    bc_todo_title = ""
 
-    do_drive = st.checkbox("Upload to Drive", value=True)
-    do_basecamp = st.checkbox("Upload to Basecamp") 
-
+    # --- USER-SPECIFIC UPLOAD OPTIONS ---
+    do_drive = st.checkbox("Upload to Drive")
+    do_basecamp = st.checkbox("Upload to Basecamp")
+    
+    bc_session_user = None
     if do_basecamp:
-        bc_session = get_basecamp_session()
-        if bc_session:
+        if st.session_state.basecamp_token:
+            bc_session_user = get_basecamp_session_user()
             try:
-                projects_list = get_basecamp_projects(bc_session)
+                projects_list = get_basecamp_projects(bc_session_user)
                 if not projects_list:
                     st.warning("No active Basecamp projects found.")
                 else:
-                    selected_project_name = st.selectbox("Select Basecamp Project", options=[p[0] for p in projects_list], index=None, placeholder="Choose a project...")
-                    
+                    selected_project_name = st.selectbox("Select Project", options=[p[0] for p in projects_list], index=None, placeholder="Choose...")
                     if selected_project_name:
                         bc_project_id = next(p[1] for p in projects_list if p[0] == selected_project_name)
-                        todolists_list = get_basecamp_todolists(bc_session, bc_project_id)
-                        
-                        if not todolists_list:
-                            st.warning("No to-do lists found.")
+                        todolists = get_basecamp_todolists(bc_session_user, bc_project_id)
+                        if not todolists: st.warning("No to-do lists found.")
                         else:
-                            selected_todolist_name = st.selectbox("Select To-Do List", options=[tl[0] for tl in todolists_list], index=None, placeholder="Choose a to-do list...")
-                            
-                            if selected_todolist_name:
-                                bc_todolist_id = next(tl[1] for tl in todolists_list if tl[0] == selected_todolist_name)
+                            selected_list = st.selectbox("Select List", options=[tl[0] for tl in todolists], index=None, placeholder="Choose...")
+                            if selected_list:
+                                bc_todolist_id = next(tl[1] for tl in todolists if tl[0] == selected_list)
                                 bc_todo_title = st.text_input("To-Do Title :red[*]")
-                                if date_str:
-                                    st.info(f"📎 Minutes_{date_str}.docx will be attached to the 'Notes' of this to-do.")
-                                else:
-                                    st.info("📎 The generated .docx will be attached to the 'Notes' of this to-do.")
-            except Exception as e:
-                st.error(f"Error loading Basecamp data: {e}")
+                                if date_str: st.info(f"📎 Minutes_{date_str}.docx will be attached to Notes.")
+            except Exception as e: st.error(f"Basecamp Error: {e}")
+        else:
+            st.warning("⚠️ Please log in to Basecamp in the sidebar first.")
+
+    if do_drive and not st.session_state.gdrive_creds:
+        st.warning("⚠️ Please log in to Google Drive in the sidebar first.")
 
     if st.button("Generate Word Doc"):
         basecamp_ready = True
         if do_basecamp:
-            if not bc_session:
-                st.error("Basecamp is not connected.")
+            if not st.session_state.basecamp_token:
+                st.error("Basecamp not connected.")
                 basecamp_ready = False
-            if not bc_project_id or not bc_todolist_id:
-                st.error("Please select a Basecamp project and to-do list.")
-                basecamp_ready = False
-            if not bc_todo_title:
-                st.error("Please enter a Basecamp To-Do Title.")
+            elif not bc_project_id or not bc_todolist_id or not bc_todo_title:
+                st.error("Please complete Basecamp fields.")
                 basecamp_ready = False
 
         if not date_str or not prepared_by or not client_rep:
             st.error("Missing required fields (*)")
         elif not do_basecamp or basecamp_ready:
-            try:
-                doc = Document("Minutes Of Meeting - Template.docx")
-                t0 = doc.tables[0]
-                t0.cell(1,1).text = date_str
-                t0.cell(2,1).text = time_str
-                t0.cell(3,1).text = venue
-                
-                c_rep_final = f"{client_rep} (Client)" if client_rep and "(Client)" not in client_rep else client_rep
-                i_rep_final = f"{ifoundries_rep} (iFoundries)" if ifoundries_rep and "(iFoundries)" not in ifoundries_rep else ifoundries_rep
-                
-                t0.cell(4,1).text = c_rep_final
-                t0.cell(4,2).text = i_rep_final
-                t0.cell(5,1).text = absent
+            if do_drive and not st.session_state.gdrive_creds:
+                st.error("Google Drive not connected.")
+            else:
+                try:
+                    doc = Document("Minutes Of Meeting - Template.docx")
+                    t0 = doc.tables[0]
+                    t0.cell(1,1).text = date_str
+                    t0.cell(2,1).text = time_str
+                    t0.cell(3,1).text = venue
+                    c_rep_final = f"{client_rep} (Client)" if client_rep and "(Client)" not in client_rep else client_rep
+                    i_rep_final = f"{ifoundries_rep} (iFoundries)" if ifoundries_rep and "(iFoundries)" not in ifoundries_rep else ifoundries_rep
+                    t0.cell(4,1).text = c_rep_final
+                    t0.cell(4,2).text = i_rep_final
+                    t0.cell(5,1).text = absent
 
-                t1 = doc.tables[1]
-                add_formatted_text(t1.cell(2,1), discussion_text)
-                add_formatted_text(t1.cell(4,1), next_steps_text)
-                doc.paragraphs[-1].text = f"Prepared by: {prepared_by}"
-                
-                bio = io.BytesIO()
-                doc.save(bio)
-                bio.seek(0)
-                fname = f"Minutes_{date_str}.docx"
-                
-                if do_drive:
-                    with st.spinner("Uploading to Drive..."):
-                        if upload_to_drive(bio, fname):
-                            st.success("Uploaded to Drive!")
-                        else:
-                            st.error("Drive upload failed.")
-                    bio.seek(0)
-
-                if do_basecamp and basecamp_ready and bc_session:
-                    with st.spinner(f"Uploading {fname} to Basecamp..."):
-                        file_bytes = bio.getvalue()
-                        sgid = upload_bc_attachment(bc_session, file_bytes, fname)
+                    t1 = doc.tables[1]
+                    add_formatted_text(t1.cell(2,1), discussion_text)
+                    add_formatted_text(t1.cell(4,1), next_steps_text)
+                    doc.paragraphs[-1].text = f"Prepared by: {prepared_by}"
                     
-                    if sgid:
-                        with st.spinner("Creating To-Do in Basecamp..."):
-                            if create_bc_todo(bc_session, bc_project_id, bc_todolist_id, bc_todo_title, sgid):
-                                st.success("Created To-Do in Basecamp!")
-                            else:
-                                st.error("Basecamp to-do creation failed.")
-                    else:
-                        st.error("Basecamp file upload failed.")
+                    bio = io.BytesIO()
+                    doc.save(bio)
                     bio.seek(0)
+                    fname = f"Minutes_{date_str}.docx"
+                    
+                    if do_drive and st.session_state.gdrive_creds:
+                        with st.spinner("Uploading to Drive..."):
+                            if upload_to_drive_user(bio, fname): st.success("Uploaded to Drive!")
+                            else: st.error("Drive upload failed.")
+                        bio.seek(0)
 
-                st.download_button("Download .docx", bio, fname)
-                
-            except Exception as e:
-                st.error(f"Error generating document: {e}")
+                    if do_basecamp and basecamp_ready and bc_session_user:
+                        with st.spinner(f"Uploading to Basecamp..."):
+                            file_bytes = bio.getvalue()
+                            sgid = upload_bc_attachment(bc_session_user, file_bytes, fname)
+                        
+                        if sgid:
+                            with st.spinner("Creating To-Do..."):
+                                if create_bc_todo(bc_session_user, bc_project_id, bc_todolist_id, bc_todo_title, sgid):
+                                    st.success("Created To-Do in Basecamp!")
+                                else: st.error("Basecamp creation failed.")
+                        else: st.error("Basecamp file upload failed.")
+                        bio.seek(0)
+
+                    st.download_button("Download .docx", bio, fname)
+                    
+                except Exception as e:
+                    st.error(f"Error: {e}")
 
 with tab3:
     st.header("💬 Chat with your Meeting")
