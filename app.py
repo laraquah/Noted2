@@ -470,13 +470,11 @@ with tab2:
         absent = st.text_input("Absent")
     with row2:
         time_obj = st.text_input("Time", value=sg_now.strftime("%I:%M %p"))
-        
-        # --- THIS IS THE CHANGE ---
-        # We define the iFoundries Rep variable first...
+        # --- AUTO FILL PREPARED BY FROM iFOUNDRIES REPS ---
+        # This copies the iFoundries names into Prepared By
+        default_prepared = st.session_state.auto_ifoundries_reps
+        prepared_by = st.text_input("Prepared by", value=default_prepared)
         ifoundries_rep = st.text_input("iFoundries Reps", value=st.session_state.auto_ifoundries_reps)
-        # ...then we use it as the default value for Prepared By
-        prepared_by = st.text_input("Prepared by", value=ifoundries_rep)
-        # --- END CHANGE ---
     
     date_str = date_obj.strftime("%d %B %Y")
     time_str = time_obj
@@ -586,16 +584,14 @@ with tab2:
 
 with tab3:
     st.header("💬 Chat with your Meeting")
+    
     transcript_context = st.session_state.ai_results.get("full_transcript", "")
     participants_context = st.session_state.saved_participants_input
     
     if not transcript_context:
         st.info("⚠️ Please upload and analyze a meeting audio file in Tab 1 first.")
     else:
-        if st.button("Clear Chat"):
-            st.session_state.chat_history = []
-            st.rerun()
-
+        # Standard chat message display loop
         for message in st.session_state.chat_history:
             if message["role"] == "user":
                 with st.chat_message("user", avatar="👤"):
@@ -604,6 +600,7 @@ with tab3:
                 with st.chat_message("assistant", avatar="🤖"):
                     st.markdown(message["content"])
 
+        # Chat Input
         if prompt := st.chat_input("Ask a question about the meeting..."):
             st.session_state.chat_history.append({"role": "user", "content": prompt})
             with st.chat_message("user", avatar="👤"):
@@ -616,12 +613,13 @@ with tab3:
                             yield chunk.text
 
                 try:
+                    # --- FINAL STRICT PROMPT ---
                     full_prompt = f"""
                     You are a helpful, professional assistant answering questions about a specific meeting.
                     
                     CONTEXT (WHO IS WHO):
                     {participants_context}
-                    (Use this to identify who is the 'Client' and who is 'iFoundries/Company'.)
+                    (The format is "Name (Role)". You MUST use these names.)
 
                     TRANSCRIPT:
                     {transcript_context}
@@ -629,12 +627,12 @@ with tab3:
                     USER QUESTION:
                     {prompt}
                     
-                    RULES:
-                    1. Use the TRANSCRIPT provided above as your ONLY source of truth.
-                    2. ALWAYS refer to speakers by their REAL NAMES from the Context list, not "Speaker 1".
-                    3. IF the user asks a general question like "What does the client want?", prioritize the requests made by the person identified as "(Client)" in the context.
-                    4. If the answer is not in the transcript, simply say "That was not mentioned in the meeting."
-                    5. Be concise.
+                    STRICT RULES:
+                    1. DO NOT USE "Speaker 1", "Speaker 2", etc. Replace them with the real names from the Context list based on the conversation flow.
+                    2. If you see "Speaker 3 (the Company)", REPLACE it with the specific name of the iFoundries representative from the Context list.
+                    3. If you see "Speaker 1 (the Client)", REPLACE it with the Client's name.
+                    4. If you cannot be 100% sure who is who, refer to them by their role (e.g., "The Client", "The Project Manager") instead of "Speaker X".
+                    5. Keep answers concise.
                     """
                     
                     stream_iterator = gemini_model.generate_content(full_prompt, stream=True)
