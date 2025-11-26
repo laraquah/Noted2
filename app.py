@@ -57,13 +57,37 @@ BASECAMP_USER_AGENT = {"User-Agent": "AI Meeting Notes App (external-user)"}
 BASECAMP_REDIRECT_URI = "https://www.google.com" 
 
 # -----------------------------------------------------
-# 2. USER LOGIN FLOW (SIDEBAR)
+# 2. HELPER: GET USER IDENTITY
+# -----------------------------------------------------
+def fetch_basecamp_name(token_dict):
+    """Calls Basecamp Identity API to get the user's real name."""
+    try:
+        # We use the Launchpad API to get identity info
+        identity_url = "https://launchpad.37signals.com/authorization.json"
+        headers = {
+            "Authorization": f"Bearer {token_dict['access_token']}",
+            "User-Agent": "AI Meeting Notes App"
+        }
+        response = requests.get(identity_url, headers=headers)
+        if response.status_code == 200:
+            data = response.json()
+            first = data.get('identity', {}).get('first_name', '')
+            last = data.get('identity', {}).get('last_name', '')
+            return f"{first} {last}".strip()
+    except Exception:
+        return ""
+    return ""
+
+# -----------------------------------------------------
+# 3. USER LOGIN FLOW (SIDEBAR)
 # -----------------------------------------------------
 
 if 'gdrive_creds' not in st.session_state:
     st.session_state.gdrive_creds = None
 if 'basecamp_token' not in st.session_state:
     st.session_state.basecamp_token = None
+if 'user_real_name' not in st.session_state:
+    st.session_state.user_real_name = ""
 
 with st.sidebar:
     st.header("🔐 Login")
@@ -100,12 +124,15 @@ with st.sidebar:
     # --- BASECAMP LOGIN ---
     st.subheader("2. Basecamp")
     if st.session_state.basecamp_token:
-        st.success("✅ Connected")
+        st.success(f"✅ Connected")
+        if st.session_state.user_real_name:
+            st.caption(f"Logged in as: {st.session_state.user_real_name}")
+            
         if st.button("Logout Basecamp"):
             st.session_state.basecamp_token = None
+            st.session_state.user_real_name = ""
             st.rerun()
     else:
-        # 1. Generate the Link
         bc_oauth = OAuth2Session(BASECAMP_CLIENT_ID, redirect_uri=BASECAMP_REDIRECT_URI)
         bc_auth_url, _ = bc_oauth.authorization_url(BASECAMP_AUTH_URL, type="web_server")
         
@@ -115,34 +142,26 @@ with st.sidebar:
         
         if bc_code:
             try:
-                # --- THIS IS THE MANUAL FIX ---
-                # We bypass the library and send a raw POST request
-                # This guarantees the client_id is sent exactly where Basecamp wants it.
-                payload = {
-                    "type": "web_server",
-                    "client_id": BASECAMP_CLIENT_ID,
-                    "client_secret": BASECAMP_CLIENT_SECRET,
-                    "redirect_uri": BASECAMP_REDIRECT_URI,
-                    "code": bc_code
-                }
-                
-                # Send the request directly
-                response = requests.post(BASECAMP_TOKEN_URL, data=payload)
-                response.raise_for_status() # Raise error if login failed
-                
-                # Save the token
-                token = response.json()
+                token = bc_oauth.fetch_token(
+                    BASECAMP_TOKEN_URL,
+                    client_id=BASECAMP_CLIENT_ID,
+                    client_secret=BASECAMP_CLIENT_SECRET,
+                    code=bc_code,
+                    type="web_server"
+                )
                 st.session_state.basecamp_token = token
-                st.rerun()
                 
+                # --- AUTO-FETCH NAME ---
+                real_name = fetch_basecamp_name(token)
+                if real_name:
+                    st.session_state.user_real_name = real_name
+                
+                st.rerun()
             except Exception as e:
                 st.error(f"Login failed: {e}")
-                # Debug info just in case
-                if 'response' in locals():
-                    st.error(f"Server said: {response.text}")
 
 # -----------------------------------------------------
-# 3. API CLIENTS (ROBOT) SETUP
+# 4. API CLIENTS (ROBOT) SETUP
 # -----------------------------------------------------
 try:
     sa_creds = service_account.Credentials.from_service_account_info(GCP_SERVICE_ACCOUNT_JSON)
@@ -156,7 +175,7 @@ except Exception as e:
     st.stop()
 
 # -----------------------------------------------------
-# 4. HELPER FUNCTIONS
+# 5. HELPER FUNCTIONS
 # -----------------------------------------------------
 
 def get_basecamp_session_user():
@@ -179,7 +198,7 @@ def upload_to_drive_user(file_stream, file_name):
     if not st.session_state.gdrive_creds: return None
     try:
         service = build("drive", "v3", credentials=st.session_state.gdrive_creds)
-        file_metadata = {"name": file_name} # Uploads to Root Folder
+        file_metadata = {"name": file_name} 
         media = MediaIoBaseUpload(
             file_stream, mimetype="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
         )
@@ -438,7 +457,10 @@ with tab2:
         absent = st.text_input("Absent")
     with row2:
         time_obj = st.text_input("Time", value=sg_now.strftime("%I:%M %p"))
-        prepared_by = st.text_input("Prepared by")
+        # --- AUTO FILL PREPARED BY ---
+        # We check session state for the Basecamp name first
+        default_prepared = st.session_state.user_real_name if "user_real_name" in st.session_state else ""
+        prepared_by = st.text_input("Prepared by", value=default_prepared)
         ifoundries_rep = st.text_input("iFoundries Reps", value=st.session_state.auto_ifoundries_reps)
     
     date_str = date_obj.strftime("%d %B %Y")
@@ -559,6 +581,12 @@ with tab3:
                 st.markdown(prompt)
 
             with st.chat_message("assistant"):
+                # --- FIX: Text Stream Generator ---
+                def stream_text(response_iterator):
+                    for chunk in response_iterator:
+                        if chunk.text:
+                            yield chunk.text
+
                 try:
                     full_prompt = f"""
                     You are a helpful assistant answering questions about a meeting.
@@ -573,8 +601,12 @@ with tab3:
                     USER QUESTION:
                     {prompt}
                     """
-                    stream = gemini_model.generate_content(full_prompt, stream=True)
-                    response = st.write_stream(stream)
+                    # Create the stream iterator
+                    stream_iterator = gemini_model.generate_content(full_prompt, stream=True)
+                    
+                    # Use the generator to yield ONLY text chunks
+                    response = st.write_stream(stream_text(stream_iterator))
+                    
                     st.session_state.chat_history.append({"role": "assistant", "content": response})
                 except Exception as e:
                     st.error(f"An error occurred: {e}")
