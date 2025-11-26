@@ -55,7 +55,7 @@ BASECAMP_AUTH_URL = "https://launchpad.37signals.com/authorization/new"
 BASECAMP_TOKEN_URL = "https://launchpad.37signals.com/authorization/token"
 BASECAMP_API_BASE = f"https://3.basecampapi.com/{BASECAMP_ACCOUNT_ID}"
 BASECAMP_USER_AGENT = {"User-Agent": "AI Meeting Notes App (external-user)"}
-BASECAMP_REDIRECT_URI = "https://google.com" 
+BASECAMP_REDIRECT_URI = "https://www.google.com" 
 
 # -----------------------------------------------------
 # 2. USER LOGIN FLOW (SIDEBAR)
