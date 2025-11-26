@@ -78,9 +78,6 @@ with st.sidebar:
             st.rerun()
     else:
         try:
-            # Identify if installed or web config
-            config_key = "installed" if "installed" in GDRIVE_CLIENT_CONFIG else "web"
-            
             flow = Flow.from_client_config(
                 GDRIVE_CLIENT_CONFIG,
                 scopes=["https://www.googleapis.com/auth/drive"],
@@ -108,6 +105,7 @@ with st.sidebar:
             st.session_state.basecamp_token = None
             st.rerun()
     else:
+        # 1. Generate the Link
         bc_oauth = OAuth2Session(BASECAMP_CLIENT_ID, redirect_uri=BASECAMP_REDIRECT_URI)
         bc_auth_url, _ = bc_oauth.authorization_url(BASECAMP_AUTH_URL, type="web_server")
         
@@ -117,18 +115,31 @@ with st.sidebar:
         
         if bc_code:
             try:
-                # --- THIS IS THE FIX ---
-                token = bc_oauth.fetch_token(
-                    BASECAMP_TOKEN_URL,
-                    client_id=BASECAMP_CLIENT_ID,    # <--- ADDED THIS LINE
-                    client_secret=BASECAMP_CLIENT_SECRET,
-                    code=bc_code,
-                    type="web_server"
-                )
+                # --- THIS IS THE MANUAL FIX ---
+                # We bypass the library and send a raw POST request
+                # This guarantees the client_id is sent exactly where Basecamp wants it.
+                payload = {
+                    "type": "web_server",
+                    "client_id": BASECAMP_CLIENT_ID,
+                    "client_secret": BASECAMP_CLIENT_SECRET,
+                    "redirect_uri": BASECAMP_REDIRECT_URI,
+                    "code": bc_code
+                }
+                
+                # Send the request directly
+                response = requests.post(BASECAMP_TOKEN_URL, data=payload)
+                response.raise_for_status() # Raise error if login failed
+                
+                # Save the token
+                token = response.json()
                 st.session_state.basecamp_token = token
                 st.rerun()
+                
             except Exception as e:
                 st.error(f"Login failed: {e}")
+                # Debug info just in case
+                if 'response' in locals():
+                    st.error(f"Server said: {response.text}")
 
 # -----------------------------------------------------
 # 3. API CLIENTS (ROBOT) SETUP
