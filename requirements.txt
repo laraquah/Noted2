@@ -8,3 +8,4 @@ google-auth-httplib2
 requests
 requests-oauthlib
 python-docx
+pytz
