@@ -53,12 +53,11 @@ BASECAMP_USER_AGENT = {"User-Agent": "AI Meeting Notes App (external-user)"}
 BASECAMP_REDIRECT_URI = "https://www.google.com" 
 
 # -----------------------------------------------------
-# 2. HELPER: GET USER IDENTITY (Moved to Top)
+# 2. HELPER: GET USER IDENTITY
 # -----------------------------------------------------
 def fetch_basecamp_name(token_dict):
     """Calls Basecamp Identity API to get the user's real name."""
     try:
-        # We use the Launchpad API to get identity info
         identity_url = "https://launchpad.37signals.com/authorization.json"
         headers = {
             "Authorization": f"Bearer {token_dict['access_token']}",
@@ -121,7 +120,6 @@ with st.sidebar:
     st.subheader("2. Basecamp")
     if st.session_state.basecamp_token:
         st.success(f"✅ Connected")
-        # Show the retrieved name to verify it worked
         if st.session_state.user_real_name:
             st.caption(f"👤 Logged in as: **{st.session_state.user_real_name}**")
             
@@ -153,7 +151,6 @@ with st.sidebar:
                 
                 st.session_state.basecamp_token = token
                 
-                # --- THIS IS THE AUTO-NAME LOGIC ---
                 real_name = fetch_basecamp_name(token)
                 if real_name:
                     st.session_state.user_real_name = real_name
@@ -420,8 +417,6 @@ if "auto_client_reps" not in st.session_state:
     st.session_state.auto_client_reps = ""
 if "auto_ifoundries_reps" not in st.session_state:
     st.session_state.auto_ifoundries_reps = ""
-
-# --- NEW: PARTICIPANT CONTEXT STATE ---
 if "saved_participants_input" not in st.session_state:
     st.session_state.saved_participants_input = ""
 
@@ -431,7 +426,11 @@ tab1, tab2, tab3 = st.tabs(["1. Analyze", "2. Review & Export", "3. Chat"])
 
 with tab1:
     st.header("1. Analyze Audio")
-    participants_input = st.text_area("Known Participants (Teach the AI)", value="Name (Client)\nName (iFoundries)", help="The AI will read this to match 'Speaker 1' to these names.")
+    participants_input = st.text_area(
+        "Known Participants (Teach the AI)", 
+        value="Client's Exact Name (Client)\niFoundries Exact Name (iFoundries)",
+        help="The AI will read this to match 'Speaker 1' to these names."
+    )
     uploaded_file = st.file_uploader("Upload Meeting", type=["mp3", "mp4", "m4a", "wav"])
     
     if st.button("Analyze Audio"):
@@ -441,7 +440,7 @@ with tab1:
                 path = tmp.name
             
             st.session_state.chat_history = [] 
-            st.session_state.saved_participants_input = participants_input
+            st.session_state.saved_participants_input = participants_input 
             
             # Auto-fill logic
             c_list = [l.replace("(Client)","").strip() for l in participants_input.split('\n') if "(Client)" in l]
@@ -460,7 +459,6 @@ with tab1:
 with tab2:
     st.header("2. Review Notes")
     
-    # Timezone Setup
     sg_tz = pytz.timezone('Asia/Singapore')
     sg_now = datetime.datetime.now(sg_tz)
     
@@ -472,11 +470,13 @@ with tab2:
         absent = st.text_input("Absent")
     with row2:
         time_obj = st.text_input("Time", value=sg_now.strftime("%I:%M %p"))
-        # --- AUTO FILL PREPARED BY ---
-        # We look for the Basecamp name in session state. If it's there, it populates the box.
-        default_prepared = st.session_state.user_real_name if "user_real_name" in st.session_state else ""
-        prepared_by = st.text_input("Prepared by", value=default_prepared)
+        
+        # --- THIS IS THE CHANGE ---
+        # We define the iFoundries Rep variable first...
         ifoundries_rep = st.text_input("iFoundries Reps", value=st.session_state.auto_ifoundries_reps)
+        # ...then we use it as the default value for Prepared By
+        prepared_by = st.text_input("Prepared by", value=ifoundries_rep)
+        # --- END CHANGE ---
     
     date_str = date_obj.strftime("%d %B %Y")
     time_str = time_obj
@@ -493,7 +493,7 @@ with tab2:
     bc_todolist_id = None
     bc_todo_title = ""
 
-    do_drive = st.checkbox("Upload to Drive", value=True)
+    do_drive = st.checkbox("Upload to Drive")
     do_basecamp = st.checkbox("Upload to Basecamp") 
 
     if do_basecamp:
@@ -586,22 +586,17 @@ with tab2:
 
 with tab3:
     st.header("💬 Chat with your Meeting")
-    
-    # Get transcript and context
     transcript_context = st.session_state.ai_results.get("full_transcript", "")
     participants_context = st.session_state.saved_participants_input
     
     if not transcript_context:
         st.info("⚠️ Please upload and analyze a meeting audio file in Tab 1 first.")
     else:
-        # Add a "Clear Chat" button
         if st.button("Clear Chat"):
             st.session_state.chat_history = []
             st.rerun()
 
-        # Display chat messages
         for message in st.session_state.chat_history:
-            # Distinguish avatars: User vs Bot
             if message["role"] == "user":
                 with st.chat_message("user", avatar="👤"):
                     st.markdown(message["content"])
@@ -610,28 +605,23 @@ with tab3:
                     st.markdown(message["content"])
 
         if prompt := st.chat_input("Ask a question about the meeting..."):
-            # 1. Show User Message
             st.session_state.chat_history.append({"role": "user", "content": prompt})
             with st.chat_message("user", avatar="👤"):
                 st.markdown(prompt)
 
-            # 2. Generate Bot Response
             with st.chat_message("assistant", avatar="🤖"):
-                # Fix for "Not Printing Words" - Simple Generator
                 def stream_text(response_iterator):
-                    # Robust generator that ignores empty chunks
                     for chunk in response_iterator:
                         if chunk.parts:
                             yield chunk.text
 
                 try:
-                    # --- ENHANCED PROMPT WITH SPEAKER MAPPING ---
                     full_prompt = f"""
                     You are a helpful, professional assistant answering questions about a specific meeting.
                     
                     CONTEXT (WHO IS WHO):
                     {participants_context}
-                    (These are the names of the people. Map Speaker 1, Speaker 2 etc. to these names.)
+                    (Use this to identify who is the 'Client' and who is 'iFoundries/Company'.)
 
                     TRANSCRIPT:
                     {transcript_context}
@@ -644,7 +634,7 @@ with tab3:
                     2. ALWAYS refer to speakers by their REAL NAMES from the Context list, not "Speaker 1".
                     3. IF the user asks a general question like "What does the client want?", prioritize the requests made by the person identified as "(Client)" in the context.
                     4. If the answer is not in the transcript, simply say "That was not mentioned in the meeting."
-                    5. Keep answers concise and to the point.
+                    5. Be concise.
                     """
                     
                     stream_iterator = gemini_model.generate_content(full_prompt, stream=True)
