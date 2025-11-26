@@ -470,9 +470,14 @@ with tab2:
         absent = st.text_input("Absent")
     with row2:
         time_obj = st.text_input("Time", value=sg_now.strftime("%I:%M %p"))
-        # --- AUTO FILL PREPARED BY FROM iFOUNDRIES REPS ---
+        
+        # --- AUTO FILL PREPARED BY LOGIC ---
+        # Priority 1: The logged-in Basecamp user
+        # Priority 2: The iFoundries rep identified by AI
+        default_prepared_by = st.session_state.user_real_name if st.session_state.user_real_name else st.session_state.auto_ifoundries_reps
+        
+        prepared_by = st.text_input("Prepared by", value=default_prepared_by)
         ifoundries_rep = st.text_input("iFoundries Reps", value=st.session_state.auto_ifoundries_reps)
-        prepared_by = st.text_input("Prepared by", value=ifoundries_rep) # Defaults to iFoundries Rep
     
     date_str = date_obj.strftime("%d %B %Y")
     time_str = time_obj
