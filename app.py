@@ -30,7 +30,7 @@ from docx.shared import Pt, Inches
 # -----------------------------------------------------
 # 1. CONSTANTS & CONFIGURATION
 # -----------------------------------------------------
-st.set_page_config(layout="wide", page_title="AI Meeting Manager")
+st.set_page_config(layout="wide", page_title="AI Meeting Manager", page_icon="🤖")
 
 # --- Load App Keys from Secrets ---
 try:
@@ -89,13 +89,13 @@ if 'user_real_name' not in st.session_state:
     st.session_state.user_real_name = ""
 
 with st.sidebar:
-    st.header("🔐 Login")
-    st.info("Log in to upload to **YOUR** accounts.")
+    st.title("🔐 Login")
+    st.markdown("Log in to upload files to **YOUR** personal accounts.")
 
     # --- GOOGLE DRIVE LOGIN ---
     st.subheader("1. Google Drive")
     if st.session_state.gdrive_creds:
-        st.success("✅ Connected")
+        st.success("✅ Connected to Drive")
         if st.button("Logout Drive"):
             st.session_state.gdrive_creds = None
             st.rerun()
@@ -108,7 +108,7 @@ with st.sidebar:
             )
             auth_url, _ = flow.authorization_url(prompt='consent')
             
-            st.markdown(f"[**Click to Authorize Google Drive**]({auth_url})")
+            st.markdown(f"👉 [**Authorize Google Drive**]({auth_url})")
             g_code = st.text_input("Paste Google Code:", key="g_code")
             
             if g_code:
@@ -125,7 +125,7 @@ with st.sidebar:
     if st.session_state.basecamp_token:
         st.success(f"✅ Connected")
         if st.session_state.user_real_name:
-            st.caption(f"Logged in as: {st.session_state.user_real_name}")
+            st.caption(f"👤 {st.session_state.user_real_name}")
             
         if st.button("Logout Basecamp"):
             st.session_state.basecamp_token = None
@@ -135,29 +135,34 @@ with st.sidebar:
         bc_oauth = OAuth2Session(BASECAMP_CLIENT_ID, redirect_uri=BASECAMP_REDIRECT_URI)
         bc_auth_url, _ = bc_oauth.authorization_url(BASECAMP_AUTH_URL, type="web_server")
         
-        st.markdown(f"[**Click to Authorize Basecamp**]({bc_auth_url})")
-        st.caption("You will be redirected to Google. Copy the code from the URL bar (after `code=`).")
+        st.markdown(f"👉 [**Authorize Basecamp**]({bc_auth_url})")
+        st.caption("Copy the code from the Google URL bar (after `code=`).")
         bc_code = st.text_input("Paste Basecamp Code:", key="bc_code")
         
         if bc_code:
             try:
-                token = bc_oauth.fetch_token(
-                    BASECAMP_TOKEN_URL,
-                    client_id=BASECAMP_CLIENT_ID,
-                    client_secret=BASECAMP_CLIENT_SECRET,
-                    code=bc_code,
-                    type="web_server"
-                )
+                # Manual Token Fetch fix
+                payload = {
+                    "type": "web_server",
+                    "client_id": BASECAMP_CLIENT_ID,
+                    "client_secret": BASECAMP_CLIENT_SECRET,
+                    "redirect_uri": BASECAMP_REDIRECT_URI,
+                    "code": bc_code
+                }
+                response = requests.post(BASECAMP_TOKEN_URL, data=payload)
+                response.raise_for_status()
+                token = response.json()
+                
                 st.session_state.basecamp_token = token
                 
-                # --- AUTO-FETCH NAME ---
+                # Auto-fetch Name
                 real_name = fetch_basecamp_name(token)
                 if real_name:
                     st.session_state.user_real_name = real_name
                 
                 st.rerun()
             except Exception as e:
-                st.error(f"Login failed: {e}")
+                st.error(f"Login failed. Check code.")
 
 # -----------------------------------------------------
 # 4. API CLIENTS (ROBOT) SETUP
@@ -427,8 +432,10 @@ st.title("🤖 AI Meeting Manager")
 tab1, tab2, tab3 = st.tabs(["1. Analyze", "2. Review & Export", "3. Chat"])
 
 with tab1:
-    participants_input = st.text_area("Known Participants", value="Name (Client)\nName (iFoundries)")
-    uploaded_file = st.file_uploader("Upload Meeting", type=["mp3", "mp4", "m4a", "wav"])
+    st.header("1. Analyze Audio")
+    participants_input = st.text_area("Known Participants (Teach the AI)", value="Name (Client)\nName (iFoundries)", help="The AI will read this to match 'Speaker 1' to these names.")
+    uploaded_file = st.file_uploader("Upload Meeting (MP3/MP4)", type=["mp3", "mp4", "m4a", "wav"])
+    
     if st.button("Analyze Audio"):
         if uploaded_file:
             with tempfile.NamedTemporaryFile(delete=False, suffix=f".{uploaded_file.name}") as tmp:
@@ -436,8 +443,6 @@ with tab1:
                 path = tmp.name
             
             st.session_state.chat_history = [] 
-            
-            # --- Save Participant Context for Chat ---
             st.session_state.saved_participants_input = participants_input
             
             # Auto-fill logic
@@ -451,8 +456,12 @@ with tab1:
             else: 
                 st.session_state.ai_results = res
                 st.success("Analysis Complete!")
+        else:
+            st.warning("Please upload a file first.")
 
 with tab2:
+    st.header("2. Review Notes")
+    
     # Timezone Setup
     sg_tz = pytz.timezone('Asia/Singapore')
     sg_now = datetime.datetime.now(sg_tz)
@@ -465,7 +474,6 @@ with tab2:
         absent = st.text_input("Absent")
     with row2:
         time_obj = st.text_input("Time", value=sg_now.strftime("%I:%M %p"))
-        # --- AUTO FILL PREPARED BY ---
         default_prepared = st.session_state.user_real_name if "user_real_name" in st.session_state else ""
         prepared_by = st.text_input("Prepared by", value=default_prepared)
         ifoundries_rep = st.text_input("iFoundries Reps", value=st.session_state.auto_ifoundries_reps)
@@ -478,11 +486,16 @@ with tab2:
     with st.expander("View Specific Client Requests"):
         st.text_area("Client Requests", value=st.session_state.ai_results.get("client_reqs", ""), height=150)
 
-    # --- USER-SPECIFIC UPLOAD OPTIONS ---
-    do_drive = st.checkbox("Upload to Drive")
-    do_basecamp = st.checkbox("Upload to Basecamp")
+    st.header("3. Generate & Upload")
     
     bc_session_user = None
+    bc_project_id = None
+    bc_todolist_id = None
+    bc_todo_title = ""
+
+    do_drive = st.checkbox("Upload to Drive", value=True)
+    do_basecamp = st.checkbox("Upload to Basecamp") 
+
     if do_basecamp:
         if st.session_state.basecamp_token:
             bc_session_user = get_basecamp_session_user()
@@ -574,40 +587,50 @@ with tab2:
 with tab3:
     st.header("💬 Chat with your Meeting")
     
-    # Get context from results AND saved participants
+    # Get transcript and context
     transcript_context = st.session_state.ai_results.get("full_transcript", "")
     participants_context = st.session_state.saved_participants_input
     
     if not transcript_context:
         st.info("⚠️ Please upload and analyze a meeting audio file in Tab 1 first.")
     else:
-        # Standard Chat Interface
-        for message in st.session_state.chat_history:
-            with st.chat_message(message["role"]):
-                st.markdown(message["content"])
+        # Add a "Clear Chat" button
+        if st.button("Clear Chat"):
+            st.session_state.chat_history = []
+            st.rerun()
 
+        # Display chat messages
+        for message in st.session_state.chat_history:
+            # Distinguish avatars: User vs Bot
+            if message["role"] == "user":
+                with st.chat_message("user", avatar="👤"):
+                    st.markdown(message["content"])
+            else:
+                with st.chat_message("assistant", avatar="🤖"):
+                    st.markdown(message["content"])
+
+        # User Input
         if prompt := st.chat_input("Ask a question about the meeting..."):
-            # 1. Show User Message
+            # Add user message
             st.session_state.chat_history.append({"role": "user", "content": prompt})
-            with st.chat_message("user"):
+            with st.chat_message("user", avatar="👤"):
                 st.markdown(prompt)
 
-            # 2. Generate Bot Response
-            with st.chat_message("assistant"):
-                # Fix for "Not Printing Words" - Simple Generator
+            # Generate response
+            with st.chat_message("assistant", avatar="🤖"):
                 def stream_text(response_iterator):
+                    # Robust generator that ignores empty chunks
                     for chunk in response_iterator:
-                        if chunk.text:
+                        if chunk.parts:
                             yield chunk.text
 
                 try:
-                    # --- ENHANCED PROMPT WITH MAPPING ---
                     full_prompt = f"""
-                    You are a helpful assistant answering questions about a meeting.
+                    You are a helpful, professional assistant answering questions about a specific meeting.
                     
                     CONTEXT (WHO IS WHO):
                     {participants_context}
-                    (Use this list to identify Speaker 1, Speaker 2, etc.)
+                    (Use this to identify Speaker 1, Speaker 2, etc.)
 
                     TRANSCRIPT:
                     {transcript_context}
@@ -616,9 +639,10 @@ with tab3:
                     {prompt}
                     
                     RULES:
-                    1. Use the TRANSCRIPT as your source.
-                    2. ALWAYS refer to speakers by their REAL NAMES from the Context, not "Speaker 1".
-                    3. If the answer is not in the transcript, say "That was not mentioned."
+                    1. Use the TRANSCRIPT provided above as your ONLY source of truth.
+                    2. ALWAYS refer to speakers by their REAL NAMES from the Context list, not "Speaker 1".
+                    3. If the answer is not in the transcript, simply say "That was not mentioned in the meeting."
+                    4. Keep answers concise and to the point.
                     """
                     
                     stream_iterator = gemini_model.generate_content(full_prompt, stream=True)
@@ -626,4 +650,4 @@ with tab3:
                     
                     st.session_state.chat_history.append({"role": "assistant", "content": response})
                 except Exception as e:
-                    st.error(f"An error occurred: {e}")
+                    st.error("I couldn't generate a response. Please try again.")
