@@ -42,16 +42,15 @@ try:
     BASECAMP_CLIENT_SECRET = st.secrets["BASECAMP_CLIENT_SECRET"]
     BASECAMP_ACCOUNT_ID = st.secrets["BASECAMP_ACCOUNT_ID"]
     
-    # --- AUTO-LOGIN CONFIG ---
-    # If this secret exists, we use Auto-Login. If not, we use Manual Copy-Paste.
+    # --- AUTO-LOGIN LOGIC ---
+    # If the secret exists, use it. Otherwise default to Google manual method.
     STREAMLIT_APP_URL = st.secrets.get("STREAMLIT_APP_URL", None)
     
     if STREAMLIT_APP_URL:
-        # Clean up URL to ensure no trailing slash
+        # Ensure no trailing slash for exact matching
         BASECAMP_REDIRECT_URI = STREAMLIT_APP_URL.rstrip("/")
         AUTO_LOGIN_MODE = True
     else:
-        # Fallback to manual method
         BASECAMP_REDIRECT_URI = "https://www.google.com"
         AUTO_LOGIN_MODE = False
 
@@ -87,9 +86,8 @@ def fetch_basecamp_name(token_dict):
     return ""
 
 # -----------------------------------------------------
-# 3. USER LOGIN FLOW (SIDEBAR)
+# 3. AUTO-LOGIN HANDLER (The Magic Part)
 # -----------------------------------------------------
-
 if 'gdrive_creds' not in st.session_state:
     st.session_state.gdrive_creds = None
 if 'basecamp_token' not in st.session_state:
@@ -97,35 +95,44 @@ if 'basecamp_token' not in st.session_state:
 if 'user_real_name' not in st.session_state:
     st.session_state.user_real_name = ""
 
-# --- AUTO-LOGIN HANDLER (Only runs if STREAMLIT_APP_URL is set) ---
-if AUTO_LOGIN_MODE and "code" in st.query_params and not st.session_state.basecamp_token:
-    auth_code = st.query_params["code"]
-    try:
-        payload = {
-            "type": "web_server",
-            "client_id": BASECAMP_CLIENT_ID,
-            "client_secret": BASECAMP_CLIENT_SECRET,
-            "redirect_uri": BASECAMP_REDIRECT_URI,
-            "code": auth_code
-        }
-        # Manual request to ensure client_id is sent
-        response = requests.post(BASECAMP_TOKEN_URL, data=payload)
-        response.raise_for_status()
-        token = response.json()
-        
-        st.session_state.basecamp_token = token
-        
-        real_name = fetch_basecamp_name(token)
-        if real_name:
-            st.session_state.user_real_name = real_name
+# Only run this check if we are in Auto Mode
+if AUTO_LOGIN_MODE:
+    query_params = st.query_params
+    if "code" in query_params and not st.session_state.basecamp_token:
+        auth_code = query_params["code"]
+        try:
+            # Manual Token Exchange to ensure client_id is sent
+            payload = {
+                "type": "web_server",
+                "client_id": BASECAMP_CLIENT_ID,
+                "client_secret": BASECAMP_CLIENT_SECRET,
+                "redirect_uri": BASECAMP_REDIRECT_URI,
+                "code": auth_code
+            }
+            response = requests.post(BASECAMP_TOKEN_URL, data=payload)
+            response.raise_for_status()
+            token = response.json()
             
-        st.query_params.clear() # Remove code from URL
-        st.toast("✅ Auto-Login Successful!", icon="🎉")
-        time.sleep(1)
-        st.rerun()
-    except Exception as e:
-        st.error(f"Auto-login failed: {e}")
+            # Save Session
+            st.session_state.basecamp_token = token
+            
+            # Fetch Name
+            real_name = fetch_basecamp_name(token)
+            if real_name:
+                st.session_state.user_real_name = real_name
+                
+            # Clean URL and Refresh
+            st.query_params.clear()
+            st.toast("✅ Basecamp Login Successful!", icon="🎉")
+            time.sleep(1)
+            st.rerun()
+            
+        except Exception as e:
+            st.error(f"Auto-login failed: {e}")
 
+# -----------------------------------------------------
+# 4. SIDEBAR UI
+# -----------------------------------------------------
 with st.sidebar:
     st.title("🔐 Login")
     st.markdown("Log in to upload files to **YOUR** personal accounts.")
@@ -174,14 +181,13 @@ with st.sidebar:
         bc_auth_url, _ = bc_oauth.authorization_url(BASECAMP_AUTH_URL, type="web_server")
         
         if AUTO_LOGIN_MODE:
-            # --- AUTO MODE UI ---
+            # Auto Mode: Direct Link
             st.link_button("Login with Basecamp", bc_auth_url, type="primary")
-            st.caption("You will be redirected back here automatically.")
+            st.caption("Redirects to Basecamp and back.")
         else:
-            # --- MANUAL MODE UI ---
+            # Manual Mode: Copy Paste
             st.markdown(f"👉 [**Authorize Basecamp**]({bc_auth_url})")
-            st.warning("⚠️ Auto-login not configured. Paste code manually below.")
-            st.caption("Copy the code from the Google URL bar (after `code=`).")
+            st.caption("Copy the code from the Google URL bar.")
             bc_code = st.text_input("Paste Basecamp Code:", key="bc_code")
             
             if bc_code:
@@ -195,18 +201,13 @@ with st.sidebar:
                     }
                     response = requests.post(BASECAMP_TOKEN_URL, data=payload)
                     response.raise_for_status()
-                    token = response.json()
-                    
-                    st.session_state.basecamp_token = token
-                    real_name = fetch_basecamp_name(token)
-                    if real_name:
-                        st.session_state.user_real_name = real_name
+                    st.session_state.basecamp_token = response.json()
                     st.rerun()
                 except Exception as e:
                     st.error(f"Login failed: {e}")
 
 # -----------------------------------------------------
-# 4. API CLIENTS (ROBOT) SETUP
+# 5. API CLIENTS (ROBOT) SETUP
 # -----------------------------------------------------
 try:
     sa_creds = service_account.Credentials.from_service_account_info(GCP_SERVICE_ACCOUNT_JSON)
@@ -214,14 +215,13 @@ try:
     speech_client = speech.SpeechClient(credentials=sa_creds)
     
     genai.configure(api_key=GOOGLE_API_KEY)
-    # --- LOCKED MODEL TO GEMINI 2.5 FLASH-LITE ---
     gemini_model = genai.GenerativeModel('gemini-2.5-flash-lite')
 except Exception as e:
     st.error(f"System Error (AI Services): {e}")
     st.stop()
 
 # -----------------------------------------------------
-# 5. HELPER FUNCTIONS
+# 6. HELPER FUNCTIONS
 # -----------------------------------------------------
 
 def get_basecamp_session_user():
@@ -454,7 +454,7 @@ def add_formatted_text(cell, text):
             p.add_run(line)
 
 # -----------------------------------------------------
-# 6. STREAMLIT UI
+# 7. STREAMLIT UI
 # -----------------------------------------------------
 if 'ai_results' not in st.session_state:
     st.session_state.ai_results = {"discussion": "", "next_steps": "", "client_reqs": "", "full_transcript": ""}
@@ -518,6 +518,7 @@ with tab2:
     with row2:
         time_obj = st.text_input("Time", value=sg_now.strftime("%I:%M %p"))
         
+        # --- AUTO FILL PREPARED BY ---
         default_prepared_by = st.session_state.user_real_name if st.session_state.user_real_name else st.session_state.auto_ifoundries_reps
         
         prepared_by = st.text_input("Prepared by", value=default_prepared_by)
@@ -668,13 +669,13 @@ with tab3:
                                 yield chunk.text
 
                     try:
-                        # --- FINAL "OFFICIAL LOG" STYLE PROMPT ---
+                        # --- FINAL "SECRETARY PERSONA" PROMPT ---
                         full_prompt = f"""
-                        You are an efficient, action-oriented meeting secretary who was present at this meeting.
+                        You are an efficient, professional meeting secretary.
                         
                         CONTEXT (PARTICIPANTS):
                         {participants_context}
-                        (These are the real names. Map "Speaker X" to these real names based on the conversation flow.)
+                        (These are the real names. Map "Speaker X" to these names based on conversation flow.)
 
                         TRANSCRIPT:
                         {transcript_context}
@@ -683,15 +684,13 @@ with tab3:
                         {prompt}
                         
                         STRICT RULES:
-                        1. **Voice:** Write as if you are recording the official minutes/log. Use professional, objective language.
-                        2. **Action-First Phrasing:** Prioritize the *action* or *decision* over who said it, unless the person is critical context.
-                           - BAD: "John wants the font to be blue."
-                           - GOOD: "The font needs to be changed to blue." (Passive voice / Action focus)
-                           - GOOD: "The Client requires a change to the header image." (Role focus)
-                        3. **No Speaker IDs:** NEVER use "Speaker 1", "Speaker 2". Use real names or roles (Client/Company Rep).
-                        4. **Generalization:** Do not assume names are "John". Use the names provided in the CONTEXT list.
-                        5. If the answer is not in the transcript, say "That was not discussed."
-                        6. Be concise.
+                        1. **Passive/Professional Voice:** Focus on the action/decision, NOT the speaker, unless it is a direct assignment.
+                           - BAD: "John said the font is too small."
+                           - GOOD: "The font size needs to be increased." (Focus on the task)
+                           - GOOD: "The Client requested a larger font." (Focus on the role)
+                        2. **No Speaker IDs:** NEVER use "Speaker 1" or "Speaker 2".
+                        3. **Accuracy:** Use the transcript as your only source. If not mentioned, say "That was not discussed."
+                        4. **Conciseness:** Be brief and clear.
                         """
                         
                         stream_iterator = gemini_model.generate_content(full_prompt, stream=True)
