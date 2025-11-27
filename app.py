@@ -42,7 +42,8 @@ try:
     BASECAMP_CLIENT_SECRET = st.secrets["BASECAMP_CLIENT_SECRET"]
     BASECAMP_ACCOUNT_ID = st.secrets["BASECAMP_ACCOUNT_ID"]
     
-    # Use the App URL from secrets, or default to Google if testing locally without config
+    # --- NEW: Get the App URL for Auto-Login ---
+    # Default to google if not set, but Auto-login won't work without the real URL
     BASECAMP_REDIRECT_URI = st.secrets.get("STREAMLIT_APP_URL", "https://www.google.com")
     
 except Exception as e:
@@ -77,7 +78,7 @@ def fetch_basecamp_name(token_dict):
     return ""
 
 # -----------------------------------------------------
-# 3. AUTOMATIC LOGIN HANDLER (THE NEW MAGIC)
+# 3. AUTO-LOGIN HANDLER (The Magic Part)
 # -----------------------------------------------------
 if 'gdrive_creds' not in st.session_state:
     st.session_state.gdrive_creds = None
@@ -86,13 +87,12 @@ if 'basecamp_token' not in st.session_state:
 if 'user_real_name' not in st.session_state:
     st.session_state.user_real_name = ""
 
-# Check if we just came back from Basecamp with a code!
-# st.query_params works in newer Streamlit versions
+# Check URL for code
 query_params = st.query_params
 if "code" in query_params and not st.session_state.basecamp_token:
     auth_code = query_params["code"]
     try:
-        # Perform the exchange automatically
+        # Manual Token Exchange
         payload = {
             "type": "web_server",
             "client_id": BASECAMP_CLIENT_ID,
@@ -104,16 +104,18 @@ if "code" in query_params and not st.session_state.basecamp_token:
         response.raise_for_status()
         token = response.json()
         
-        # Save login
+        # Save Session
         st.session_state.basecamp_token = token
+        
+        # Fetch Name
         real_name = fetch_basecamp_name(token)
         if real_name:
             st.session_state.user_real_name = real_name
             
-        # Clear the code from the URL so it looks clean
+        # Clean URL and Refresh
         st.query_params.clear()
-        st.toast("✅ Basecamp Auto-Login Successful!", icon="🎉")
-        time.sleep(1) # Brief pause for effect
+        st.toast("✅ Basecamp Login Successful!", icon="🎉")
+        time.sleep(1)
         st.rerun()
         
     except Exception as e:
@@ -126,7 +128,7 @@ with st.sidebar:
     st.title("🔐 Login")
     st.markdown("Log in to upload files to **YOUR** personal accounts.")
 
-    # --- GOOGLE DRIVE LOGIN (Manual Copy/Paste still safest for Drive) ---
+    # --- GOOGLE DRIVE LOGIN ---
     st.subheader("1. Google Drive")
     if st.session_state.gdrive_creds:
         st.success("✅ Connected to Drive")
@@ -154,7 +156,7 @@ with st.sidebar:
 
     st.divider()
 
-    # --- BASECAMP LOGIN (Now Automatic!) ---
+    # --- BASECAMP LOGIN ---
     st.subheader("2. Basecamp")
     if st.session_state.basecamp_token:
         st.success(f"✅ Connected")
@@ -166,13 +168,15 @@ with st.sidebar:
             st.session_state.user_real_name = ""
             st.rerun()
     else:
+        # We generate the link that sends them back to THIS app
         bc_oauth = OAuth2Session(BASECAMP_CLIENT_ID, redirect_uri=BASECAMP_REDIRECT_URI)
         bc_auth_url, _ = bc_oauth.authorization_url(BASECAMP_AUTH_URL, type="web_server")
         
-        # Simple Link - No more copy paste!
+        # Direct Link Button
         st.link_button("Login with Basecamp", bc_auth_url, type="primary")
-        st.caption("This will redirect you to Basecamp and back.")
-
+        
+        # Fallback instructions (just in case)
+        st.caption("This will redirect you to Basecamp and automatically log you in.")
 
 # -----------------------------------------------------
 # 5. API CLIENTS (ROBOT) SETUP
