@@ -1,6 +1,11 @@
 import streamlit as st
-import tempfile
 import os
+
+# --- FIX: ALLOW OAUTH TO RUN ON STREAMLIT CLOUD ---
+# This silences the "InsecureTransportError"
+os.environ['OAUTHLIB_INSECURE_TRANSPORT'] = '1'
+
+import tempfile
 from docx import Document
 import io
 import time
@@ -153,25 +158,9 @@ with st.sidebar:
         bc_auth_url, _ = bc_oauth.authorization_url(BASECAMP_AUTH_URL, type="web_server")
         
         if AUTO_LOGIN_MODE:
-            # --- THE FIX: PURE HTML LINK WITH TARGET=_TOP ---
-            # No nested buttons. Just a styled <a> tag.
-            st.markdown("""
-            <a href="{bc_auth_url}" target="_top" style="
-                display: block;
-                width: 100%;
-                background-color: #FF4B4B;
-                color: white;
-                padding: 10px 0px;
-                text-align: center;
-                border-radius: 8px;
-                text-decoration: none;
-                font-weight: 600;
-                margin-top: 10px;
-            ">
-                Login with Basecamp
-            </a>
-            """, unsafe_allow_html=True)
-            st.caption("Redirects you to Basecamp in this window.")
+            # --- FIX: Use Native Streamlit Link Button (100% Reliable) ---
+            st.link_button("Login to Basecamp", bc_auth_url, type="primary")
+            st.caption("Opens a new tab to authorize.")
         else:
             st.warning("Auto-login not configured in Secrets.")
             st.markdown(f"👉 [**Authorize Basecamp**]({bc_auth_url})")
@@ -218,7 +207,7 @@ with st.sidebar:
                 )
                 auth_url, _ = flow.authorization_url(prompt='consent')
                 
-                st.markdown(f"👉 [**Click to Authorize Drive**]({auth_url})")
+                st.link_button("Login to Google Drive", auth_url)
                 g_code = st.text_input("Paste Google Code:", key="g_code")
                 
                 if g_code:
@@ -238,7 +227,6 @@ try:
     speech_client = speech.SpeechClient(credentials=sa_creds)
     
     genai.configure(api_key=GOOGLE_API_KEY)
-    # --- LOCKED MODEL: GEMINI 2.5 FLASH-LITE ---
     gemini_model = genai.GenerativeModel('gemini-2.5-flash-lite')
 except Exception as e:
     st.error(f"System Error (AI Services): {e}")
