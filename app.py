@@ -153,27 +153,25 @@ with st.sidebar:
         bc_auth_url, _ = bc_oauth.authorization_url(BASECAMP_AUTH_URL, type="web_server")
         
         if AUTO_LOGIN_MODE:
-            # --- FIXED HTML BUTTON: BREAKS OUT OF IFRAME ---
-            # target="_top" is the key to fixing "refused to connect"
+            # --- THE FIX: PURE HTML LINK WITH TARGET=_TOP ---
+            # No nested buttons. Just a styled <a> tag.
             st.markdown(f"""
-            <a href="{bc_auth_url}" target="_top" style="text-decoration:none;">
-                <div style="
-                    background-color: #ff4b4b;
-                    color: white;
-                    padding: 10px 20px;
-                    border-radius: 5px;
-                    text-align: center;
-                    font-weight: bold;
-                    cursor: pointer;
-                    display: block;
-                    width: 100%;
-                    box-sizing: border-box;
-                ">
-                    Login to Basecamp
-                </div>
+            <a href="{bc_auth_url}" target="_top" style="
+                display: block;
+                width: 100%;
+                background-color: #FF4B4B;
+                color: white;
+                padding: 10px 0px;
+                text-align: center;
+                border-radius: 8px;
+                text-decoration: none;
+                font-weight: 600;
+                margin-top: 10px;
+            ">
+                Login with Basecamp
             </a>
             """, unsafe_allow_html=True)
-            st.caption("You must log in to Basecamp first.")
+            st.caption("Redirects you to Basecamp in this window.")
         else:
             st.warning("Auto-login not configured in Secrets.")
             st.markdown(f"👉 [**Authorize Basecamp**]({bc_auth_url})")
@@ -240,6 +238,7 @@ try:
     speech_client = speech.SpeechClient(credentials=sa_creds)
     
     genai.configure(api_key=GOOGLE_API_KEY)
+    # --- LOCKED MODEL: GEMINI 2.5 FLASH-LITE ---
     gemini_model = genai.GenerativeModel('gemini-2.5-flash-lite')
 except Exception as e:
     st.error(f"System Error (AI Services): {e}")
@@ -657,7 +656,6 @@ with tab3:
             st.session_state.chat_history = []
             st.rerun()
 
-        # --- VISUAL FIX: Scrollable Container for Messages ---
         chat_container = st.container(height=500)
         
         with chat_container:
