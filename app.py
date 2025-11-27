@@ -42,9 +42,11 @@ try:
     BASECAMP_CLIENT_SECRET = st.secrets["BASECAMP_CLIENT_SECRET"]
     BASECAMP_ACCOUNT_ID = st.secrets["BASECAMP_ACCOUNT_ID"]
     
-    # Auto-Login Logic
+    # --- AUTO-LOGIN LOGIC ---
     STREAMLIT_APP_URL = st.secrets.get("STREAMLIT_APP_URL", None)
+    
     if STREAMLIT_APP_URL:
+        # Remove trailing slash to avoid mismatch errors
         BASECAMP_REDIRECT_URI = STREAMLIT_APP_URL.rstrip("/")
         AUTO_LOGIN_MODE = True
     else:
@@ -62,34 +64,7 @@ BASECAMP_API_BASE = f"https://3.basecampapi.com/{BASECAMP_ACCOUNT_ID}"
 BASECAMP_USER_AGENT = {"User-Agent": "AI Meeting Notes App (external-user)"}
 
 # -----------------------------------------------------
-# 2. CRITICAL: RESTORE SESSIONS ON RELOAD
-# -----------------------------------------------------
-
-# Initialize state variables
-if 'gdrive_creds_json' not in st.session_state:
-    st.session_state.gdrive_creds_json = None
-if 'gdrive_creds' not in st.session_state:
-    st.session_state.gdrive_creds = None
-if 'basecamp_token' not in st.session_state:
-    st.session_state.basecamp_token = None
-if 'user_real_name' not in st.session_state:
-    st.session_state.user_real_name = ""
-
-# --- FIX: IMMEDIATE GOOGLE RE-LOGIN ---
-# If we have the JSON string but not the object (which happens after a redirect), restore it now.
-if st.session_state.gdrive_creds_json and not st.session_state.gdrive_creds:
-    try:
-        creds = Credentials.from_authorized_user_info(
-            json.loads(st.session_state.gdrive_creds_json)
-        )
-        st.session_state.gdrive_creds = creds
-        # No rerun needed here, just restore the object for the rest of the script
-    except Exception as e:
-        st.error("Failed to restore Google session. Please login again.")
-        st.session_state.gdrive_creds_json = None
-
-# -----------------------------------------------------
-# 3. HELPER: GET USER IDENTITY
+# 2. HELPER: GET USER IDENTITY
 # -----------------------------------------------------
 def fetch_basecamp_name(token_dict):
     """Calls Basecamp Identity API to get the user's real name."""
@@ -110,8 +85,17 @@ def fetch_basecamp_name(token_dict):
     return ""
 
 # -----------------------------------------------------
-# 4. AUTO-LOGIN HANDLER (BASECAMP)
+# 3. SESSION STATE & AUTO-LOGIN HANDLER
 # -----------------------------------------------------
+
+if 'gdrive_creds' not in st.session_state:
+    st.session_state.gdrive_creds = None
+if 'basecamp_token' not in st.session_state:
+    st.session_state.basecamp_token = None
+if 'user_real_name' not in st.session_state:
+    st.session_state.user_real_name = ""
+
+# --- HANDLE RETURN FROM BASECAMP ---
 if AUTO_LOGIN_MODE and "code" in st.query_params and not st.session_state.basecamp_token:
     auth_code = st.query_params["code"]
     try:
@@ -122,6 +106,7 @@ if AUTO_LOGIN_MODE and "code" in st.query_params and not st.session_state.baseca
             "redirect_uri": BASECAMP_REDIRECT_URI,
             "code": auth_code
         }
+        # Manual POST to ensure strict parameter handling
         response = requests.post(BASECAMP_TOKEN_URL, data=payload)
         response.raise_for_status()
         token = response.json()
@@ -132,58 +117,32 @@ if AUTO_LOGIN_MODE and "code" in st.query_params and not st.session_state.baseca
         if real_name:
             st.session_state.user_real_name = real_name
             
+        # Clear URL
         st.query_params.clear()
-        st.toast("✅ Basecamp Login Successful!", icon="🎉")
-        time.sleep(1)
-        st.rerun()
+        st.toast("✅ Basecamp Auto-Login Successful!", icon="🎉")
+        # No rerun needed, state is set
+        
     except Exception as e:
         st.error(f"Auto-login failed: {e}")
 
 # -----------------------------------------------------
-# 5. SIDEBAR UI
+# 4. SIDEBAR UI
 # -----------------------------------------------------
 with st.sidebar:
     st.title("🔐 Login")
-    st.markdown("Log in to upload files to **YOUR** personal accounts.")
+    
+    # --- ORDER WARNING ---
+    # Because Basecamp redirects (reloading the page), it clears other sessions.
+    # We guide the user to do Basecamp FIRST.
+    if not st.session_state.basecamp_token:
+        st.info("💡 **Tip:** Login to Basecamp *first*.")
 
-    # --- GOOGLE DRIVE LOGIN ---
-    st.subheader("1. Google Drive")
-    if st.session_state.gdrive_creds:
-        st.success("✅ Connected to Drive")
-        if st.button("Logout Drive"):
-            st.session_state.gdrive_creds = None
-            st.session_state.gdrive_creds_json = None
-            st.rerun()
-    else:
-        try:
-            flow = Flow.from_client_config(
-                GDRIVE_CLIENT_CONFIG,
-                scopes=["https://www.googleapis.com/auth/drive"],
-                redirect_uri="urn:ietf:wg:oauth:2.0:oob"
-            )
-            auth_url, _ = flow.authorization_url(prompt='consent')
-            
-            st.markdown(f"👉 [**Authorize Google Drive**]({auth_url})")
-            g_code = st.text_input("Paste Google Code:", key="g_code")
-            
-            if g_code:
-                flow.fetch_token(code=g_code)
-                # Save BOTH the object (for now) and the JSON (for after reload)
-                st.session_state.gdrive_creds = flow.credentials
-                st.session_state.gdrive_creds_json = flow.credentials.to_json()
-                st.rerun()
-        except Exception as e:
-            st.error(f"Config Error: {e}")
-
-    st.divider()
-
-    # --- BASECAMP LOGIN ---
-    st.subheader("2. Basecamp")
+    # --- 1. BASECAMP LOGIN (First for stability) ---
+    st.subheader("1. Basecamp")
     if st.session_state.basecamp_token:
         st.success(f"✅ Connected")
         if st.session_state.user_real_name:
-            st.caption(f"👤 Logged in as: **{st.session_state.user_real_name}**")
-            
+            st.caption(f"👤 {st.session_state.user_real_name}")
         if st.button("Logout Basecamp"):
             st.session_state.basecamp_token = None
             st.session_state.user_real_name = ""
@@ -193,8 +152,19 @@ with st.sidebar:
         bc_auth_url, _ = bc_oauth.authorization_url(BASECAMP_AUTH_URL, type="web_server")
         
         if AUTO_LOGIN_MODE:
-            st.link_button("Login with Basecamp", bc_auth_url, type="primary")
-            st.caption("Redirects to Basecamp and back.")
+            # --- THE FIX FOR CLOSING TABS ---
+            # Using HTML <a target="_self"> forces it to open in the SAME tab
+            st.markdown(f"""
+            <a href="{bc_auth_url}" target="_self" style="
+                display: inline-block;
+                padding: 0.5em 1em;
+                color: white;
+                background-color: #ff4b4b;
+                border-radius: 4px;
+                text-decoration: none;
+                font-weight: bold;
+            ">Login with Basecamp</a>
+            """, unsafe_allow_html=True)
         else:
             st.markdown(f"👉 [**Authorize Basecamp**]({bc_auth_url})")
             bc_code = st.text_input("Paste Basecamp Code:", key="bc_code")
@@ -210,14 +180,43 @@ with st.sidebar:
                     response = requests.post(BASECAMP_TOKEN_URL, data=payload)
                     response.raise_for_status()
                     st.session_state.basecamp_token = response.json()
+                    
                     real_name = fetch_basecamp_name(st.session_state.basecamp_token)
                     if real_name: st.session_state.user_real_name = real_name
                     st.rerun()
                 except Exception as e:
                     st.error(f"Login failed: {e}")
 
+    st.divider()
+
+    # --- 2. GOOGLE DRIVE LOGIN (Manual Copy-Paste preserves session) ---
+    st.subheader("2. Google Drive")
+    if st.session_state.gdrive_creds:
+        st.success("✅ Connected")
+        if st.button("Logout Drive"):
+            st.session_state.gdrive_creds = None
+            st.rerun()
+    else:
+        try:
+            flow = Flow.from_client_config(
+                GDRIVE_CLIENT_CONFIG,
+                scopes=["https://www.googleapis.com/auth/drive"],
+                redirect_uri="urn:ietf:wg:oauth:2.0:oob"
+            )
+            auth_url, _ = flow.authorization_url(prompt='consent')
+            
+            st.markdown(f"👉 [**Authorize Google Drive**]({auth_url})")
+            g_code = st.text_input("Paste Google Code:", key="g_code")
+            
+            if g_code:
+                flow.fetch_token(code=g_code)
+                st.session_state.gdrive_creds = flow.credentials
+                st.rerun()
+        except Exception as e:
+            st.error(f"Config Error: {e}")
+
 # -----------------------------------------------------
-# 6. API CLIENTS (ROBOT) SETUP
+# 5. API CLIENTS (ROBOT) SETUP
 # -----------------------------------------------------
 try:
     sa_creds = service_account.Credentials.from_service_account_info(GCP_SERVICE_ACCOUNT_JSON)
@@ -225,13 +224,14 @@ try:
     speech_client = speech.SpeechClient(credentials=sa_creds)
     
     genai.configure(api_key=GOOGLE_API_KEY)
+    # Locked model as requested
     gemini_model = genai.GenerativeModel('gemini-2.5-flash-lite')
 except Exception as e:
     st.error(f"System Error (AI Services): {e}")
     st.stop()
 
 # -----------------------------------------------------
-# 7. HELPER FUNCTIONS
+# 6. HELPER FUNCTIONS
 # -----------------------------------------------------
 
 def get_basecamp_session_user():
@@ -305,8 +305,6 @@ def create_bc_todo(_session, project_id, todolist_id, title, attachment_sgid):
         return False
 
 def get_structured_notes_google(audio_file_path, file_name, participants_context):
-    flac_file_path = ""
-    flac_blob_name = ""
     try:
         with st.spinner(f"Converting {file_name} to audio-only FLAC..."):
             base_name = os.path.splitext(audio_file_path)[0]
@@ -319,7 +317,7 @@ def get_structured_notes_google(audio_file_path, file_name, participants_context
             gcs_uri = upload_to_gcs(flac_file_path, flac_blob_name)
             if not gcs_uri: return {"error": "Upload failed."}
 
-        progress_text = "Transcribing & identifying speakers: 0% Complete"
+        progress_text = "Transcribing & identifying speakers..."
         progress_bar = st.progress(0, text=progress_text)
         
         audio = speech.RecognitionAudio(uri=gcs_uri)
@@ -340,12 +338,10 @@ def get_structured_notes_google(audio_file_path, file_name, participants_context
         while not operation.done():
             metadata = operation.metadata
             if metadata and metadata.progress_percent:
-                percent_complete = metadata.progress_percent
-                progress_text = f"Transcribing: {percent_complete}% Complete"
-                progress_bar.progress(percent_complete, text=progress_text)
-            time.sleep(5)
+                progress_bar.progress(metadata.progress_percent, text=f"Transcribing: {metadata.progress_percent}%")
+            time.sleep(2)
 
-        progress_bar.progress(100, text="Transcription: 100% Complete")
+        progress_bar.progress(100, text="Transcription Complete")
         response = operation.result(timeout=3600)
         progress_bar.empty()
 
@@ -401,28 +397,14 @@ def get_structured_notes_google(audio_file_path, file_name, participants_context
             client_reqs = ""
             try:
                 if "## DISCUSSION ##" in text:
-                    discussion_start = text.find("## DISCUSSION ##")
-                    if "## NEXT STEPS ##" in text:
-                        discussion_end = text.find("## NEXT STEPS ##")
-                        discussion = text[discussion_start:discussion_end].strip()
-                    else:
-                        discussion = text[discussion_start:].strip()
+                    discussion = text.split("## DISCUSSION ##")[1].split("## NEXT STEPS ##")[0].strip()
                 if "## NEXT STEPS ##" in text:
-                    next_steps_start = text.find("## NEXT STEPS ##")
-                    if "## CLIENT REQUESTS ##" in text:
-                        next_steps_end = text.find("## CLIENT REQUESTS ##")
-                        next_steps = text[next_steps_start:next_steps_end].strip()
-                    else:
-                        next_steps = text[next_steps_start:].strip()
+                    next_steps = text.split("## NEXT STEPS ##")[1].split("## CLIENT REQUESTS ##")[0].strip()
                 if "## CLIENT REQUESTS ##" in text:
-                    client_reqs_start = text.find("## CLIENT REQUESTS ##")
-                    client_reqs = text[client_reqs_start:].strip()
-                if not discussion and not next_steps:
-                    discussion = text
-            except Exception as e:
+                    client_reqs = text.split("## CLIENT REQUESTS ##")[1].strip()
+                if not discussion: discussion = text
+            except:
                 discussion = text
-                next_steps = "Parsing failed."
-                client_reqs = "Parsing failed."
 
             return {
                 "discussion": discussion,
@@ -453,13 +435,18 @@ def add_formatted_text(cell, text):
         elif line.startswith('*'):
             clean = line.lstrip('*').lstrip("•").strip()
             if clean.startswith('**') and ':**' in clean:
-                parts = clean.split(':**', 1)
-                p.text = "•\t"
-                p.add_run(parts[0].lstrip('**').strip() + ": ").bold = True
-                p.add_run(parts[1].strip())
+                try:
+                    parts = clean.split(':**', 1)
+                    p.text = "•\t"
+                    p.add_run(parts[0].lstrip('**').strip() + ": ").bold = True
+                    p.add_run(parts[1].strip())
+                    p.paragraph_format.left_indent = Inches(0.25)
+                except:
+                    p.text = f"•\t{clean}"
+                    p.paragraph_format.left_indent = Inches(0.25)
             else:
                 p.text = f"•\t{clean}"
-            p.paragraph_format.left_indent = Inches(0.25)
+                p.paragraph_format.left_indent = Inches(0.25)
         else:
             p.add_run(line)
 
@@ -527,10 +514,7 @@ with tab2:
         absent = st.text_input("Absent")
     with row2:
         time_obj = st.text_input("Time", value=sg_now.strftime("%I:%M %p"))
-        
-        # --- AUTO FILL PREPARED BY ---
         default_prepared_by = st.session_state.user_real_name if st.session_state.user_real_name else st.session_state.auto_ifoundries_reps
-        
         prepared_by = st.text_input("Prepared by", value=default_prepared_by)
         ifoundries_rep = st.text_input("iFoundries Reps", value=st.session_state.auto_ifoundries_reps)
     
@@ -679,7 +663,6 @@ with tab3:
                                 yield chunk.text
 
                     try:
-                        # --- FINAL "OFFICIAL LOG" STYLE PROMPT ---
                         full_prompt = f"""
                         You are an efficient, action-oriented meeting secretary who was present at this meeting.
                         
