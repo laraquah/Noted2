@@ -41,6 +41,10 @@ try:
     BASECAMP_CLIENT_ID = st.secrets["BASECAMP_CLIENT_ID"]
     BASECAMP_CLIENT_SECRET = st.secrets["BASECAMP_CLIENT_SECRET"]
     BASECAMP_ACCOUNT_ID = st.secrets["BASECAMP_ACCOUNT_ID"]
+    
+    # Use the App URL from secrets, or default to Google if testing locally without config
+    BASECAMP_REDIRECT_URI = st.secrets.get("STREAMLIT_APP_URL", "https://www.google.com")
+    
 except Exception as e:
     st.error(f"Secrets Configuration Error: {e}")
     st.stop()
@@ -50,7 +54,6 @@ BASECAMP_AUTH_URL = "https://launchpad.37signals.com/authorization/new"
 BASECAMP_TOKEN_URL = "https://launchpad.37signals.com/authorization/token"
 BASECAMP_API_BASE = f"https://3.basecampapi.com/{BASECAMP_ACCOUNT_ID}"
 BASECAMP_USER_AGENT = {"User-Agent": "AI Meeting Notes App (external-user)"}
-BASECAMP_REDIRECT_URI = "https://www.google.com" 
 
 # -----------------------------------------------------
 # 2. HELPER: GET USER IDENTITY
@@ -74,9 +77,8 @@ def fetch_basecamp_name(token_dict):
     return ""
 
 # -----------------------------------------------------
-# 3. USER LOGIN FLOW (SIDEBAR)
+# 3. AUTOMATIC LOGIN HANDLER (THE NEW MAGIC)
 # -----------------------------------------------------
-
 if 'gdrive_creds' not in st.session_state:
     st.session_state.gdrive_creds = None
 if 'basecamp_token' not in st.session_state:
@@ -84,11 +86,47 @@ if 'basecamp_token' not in st.session_state:
 if 'user_real_name' not in st.session_state:
     st.session_state.user_real_name = ""
 
+# Check if we just came back from Basecamp with a code!
+# st.query_params works in newer Streamlit versions
+query_params = st.query_params
+if "code" in query_params and not st.session_state.basecamp_token:
+    auth_code = query_params["code"]
+    try:
+        # Perform the exchange automatically
+        payload = {
+            "type": "web_server",
+            "client_id": BASECAMP_CLIENT_ID,
+            "client_secret": BASECAMP_CLIENT_SECRET,
+            "redirect_uri": BASECAMP_REDIRECT_URI,
+            "code": auth_code
+        }
+        response = requests.post(BASECAMP_TOKEN_URL, data=payload)
+        response.raise_for_status()
+        token = response.json()
+        
+        # Save login
+        st.session_state.basecamp_token = token
+        real_name = fetch_basecamp_name(token)
+        if real_name:
+            st.session_state.user_real_name = real_name
+            
+        # Clear the code from the URL so it looks clean
+        st.query_params.clear()
+        st.toast("✅ Basecamp Auto-Login Successful!", icon="🎉")
+        time.sleep(1) # Brief pause for effect
+        st.rerun()
+        
+    except Exception as e:
+        st.error(f"Auto-login failed: {e}")
+
+# -----------------------------------------------------
+# 4. SIDEBAR UI
+# -----------------------------------------------------
 with st.sidebar:
     st.title("🔐 Login")
     st.markdown("Log in to upload files to **YOUR** personal accounts.")
 
-    # --- GOOGLE DRIVE LOGIN ---
+    # --- GOOGLE DRIVE LOGIN (Manual Copy/Paste still safest for Drive) ---
     st.subheader("1. Google Drive")
     if st.session_state.gdrive_creds:
         st.success("✅ Connected to Drive")
@@ -116,7 +154,7 @@ with st.sidebar:
 
     st.divider()
 
-    # --- BASECAMP LOGIN ---
+    # --- BASECAMP LOGIN (Now Automatic!) ---
     st.subheader("2. Basecamp")
     if st.session_state.basecamp_token:
         st.success(f"✅ Connected")
@@ -131,36 +169,13 @@ with st.sidebar:
         bc_oauth = OAuth2Session(BASECAMP_CLIENT_ID, redirect_uri=BASECAMP_REDIRECT_URI)
         bc_auth_url, _ = bc_oauth.authorization_url(BASECAMP_AUTH_URL, type="web_server")
         
-        st.markdown(f"👉 [**Authorize Basecamp**]({bc_auth_url})")
-        st.caption("Copy the code from the Google URL bar (after `code=`).")
-        bc_code = st.text_input("Paste Basecamp Code:", key="bc_code")
-        
-        if bc_code:
-            try:
-                # Manual Token Fetch
-                payload = {
-                    "type": "web_server",
-                    "client_id": BASECAMP_CLIENT_ID,
-                    "client_secret": BASECAMP_CLIENT_SECRET,
-                    "redirect_uri": BASECAMP_REDIRECT_URI,
-                    "code": bc_code
-                }
-                response = requests.post(BASECAMP_TOKEN_URL, data=payload)
-                response.raise_for_status()
-                token = response.json()
-                
-                st.session_state.basecamp_token = token
-                
-                real_name = fetch_basecamp_name(token)
-                if real_name:
-                    st.session_state.user_real_name = real_name
-                
-                st.rerun()
-            except Exception as e:
-                st.error(f"Login failed. Check code.")
+        # Simple Link - No more copy paste!
+        st.link_button("Login with Basecamp", bc_auth_url, type="primary")
+        st.caption("This will redirect you to Basecamp and back.")
+
 
 # -----------------------------------------------------
-# 4. API CLIENTS (ROBOT) SETUP
+# 5. API CLIENTS (ROBOT) SETUP
 # -----------------------------------------------------
 try:
     sa_creds = service_account.Credentials.from_service_account_info(GCP_SERVICE_ACCOUNT_JSON)
@@ -168,16 +183,13 @@ try:
     speech_client = speech.SpeechClient(credentials=sa_creds)
     
     genai.configure(api_key=GOOGLE_API_KEY)
-    
-    # --- UPDATED MODEL TO GEMINI 2.5 FLASH-LITE ---
-    gemini_model = genai.GenerativeModel('gemini-2.5-flash-lite')
-    
+    gemini_model = genai.GenerativeModel('gemini-flash-latest')
 except Exception as e:
     st.error(f"System Error (AI Services): {e}")
     st.stop()
 
 # -----------------------------------------------------
-# 5. HELPER FUNCTIONS
+# 6. HELPER FUNCTIONS
 # -----------------------------------------------------
 
 def get_basecamp_session_user():
@@ -410,7 +422,7 @@ def add_formatted_text(cell, text):
             p.add_run(line)
 
 # -----------------------------------------------------
-# 6. STREAMLIT UI
+# 7. STREAMLIT UI
 # -----------------------------------------------------
 if 'ai_results' not in st.session_state:
     st.session_state.ai_results = {"discussion": "", "next_steps": "", "client_reqs": "", "full_transcript": ""}
@@ -625,7 +637,6 @@ with tab3:
                                 yield chunk.text
 
                     try:
-                        # --- FINAL "OFFICIAL LOG" STYLE PROMPT ---
                         full_prompt = f"""
                         You are an efficient, action-oriented meeting secretary who was present at this meeting.
                         
