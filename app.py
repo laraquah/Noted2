@@ -43,11 +43,9 @@ try:
     BASECAMP_ACCOUNT_ID = st.secrets["BASECAMP_ACCOUNT_ID"]
     
     # --- AUTO-LOGIN LOGIC ---
-    # If the secret exists, use it. Otherwise default to Google manual method.
     STREAMLIT_APP_URL = st.secrets.get("STREAMLIT_APP_URL", None)
     
     if STREAMLIT_APP_URL:
-        # Ensure no trailing slash for exact matching
         BASECAMP_REDIRECT_URI = STREAMLIT_APP_URL.rstrip("/")
         AUTO_LOGIN_MODE = True
     else:
@@ -68,7 +66,6 @@ BASECAMP_USER_AGENT = {"User-Agent": "AI Meeting Notes App (external-user)"}
 # 2. HELPER: GET USER IDENTITY
 # -----------------------------------------------------
 def fetch_basecamp_name(token_dict):
-    """Calls Basecamp Identity API to get the user's real name."""
     try:
         identity_url = "https://launchpad.37signals.com/authorization.json"
         headers = {
@@ -86,49 +83,55 @@ def fetch_basecamp_name(token_dict):
     return ""
 
 # -----------------------------------------------------
-# 3. AUTO-LOGIN HANDLER (The Magic Part)
+# 3. SESSION STATE & AUTO-LOGIN
 # -----------------------------------------------------
-if 'gdrive_creds' not in st.session_state:
-    st.session_state.gdrive_creds = None
+
+# --- FIX: Use JSON string for Drive Creds persistence ---
+if 'gdrive_creds_json' not in st.session_state:
+    st.session_state.gdrive_creds_json = None
+
+# Rehydrate Google Creds object from JSON string if it exists
+gdrive_creds_object = None
+if st.session_state.gdrive_creds_json:
+    try:
+        gdrive_creds_object = Credentials.from_authorized_user_info(
+            json.loads(st.session_state.gdrive_creds_json)
+        )
+    except:
+        st.session_state.gdrive_creds_json = None # Reset if corrupt
+
 if 'basecamp_token' not in st.session_state:
     st.session_state.basecamp_token = None
 if 'user_real_name' not in st.session_state:
     st.session_state.user_real_name = ""
 
-# Only run this check if we are in Auto Mode
-if AUTO_LOGIN_MODE:
-    query_params = st.query_params
-    if "code" in query_params and not st.session_state.basecamp_token:
-        auth_code = query_params["code"]
-        try:
-            # Manual Token Exchange to ensure client_id is sent
-            payload = {
-                "type": "web_server",
-                "client_id": BASECAMP_CLIENT_ID,
-                "client_secret": BASECAMP_CLIENT_SECRET,
-                "redirect_uri": BASECAMP_REDIRECT_URI,
-                "code": auth_code
-            }
-            response = requests.post(BASECAMP_TOKEN_URL, data=payload)
-            response.raise_for_status()
-            token = response.json()
+# --- BASECAMP AUTO-LOGIN HANDLER ---
+if AUTO_LOGIN_MODE and "code" in st.query_params and not st.session_state.basecamp_token:
+    auth_code = st.query_params["code"]
+    try:
+        payload = {
+            "type": "web_server",
+            "client_id": BASECAMP_CLIENT_ID,
+            "client_secret": BASECAMP_CLIENT_SECRET,
+            "redirect_uri": BASECAMP_REDIRECT_URI,
+            "code": auth_code
+        }
+        response = requests.post(BASECAMP_TOKEN_URL, data=payload)
+        response.raise_for_status()
+        token = response.json()
+        
+        st.session_state.basecamp_token = token
+        
+        real_name = fetch_basecamp_name(token)
+        if real_name:
+            st.session_state.user_real_name = real_name
             
-            # Save Session
-            st.session_state.basecamp_token = token
-            
-            # Fetch Name
-            real_name = fetch_basecamp_name(token)
-            if real_name:
-                st.session_state.user_real_name = real_name
-                
-            # Clean URL and Refresh
-            st.query_params.clear()
-            st.toast("✅ Basecamp Login Successful!", icon="🎉")
-            time.sleep(1)
-            st.rerun()
-            
-        except Exception as e:
-            st.error(f"Auto-login failed: {e}")
+        st.query_params.clear()
+        st.toast("✅ Basecamp Login Successful!", icon="🎉")
+        time.sleep(1)
+        st.rerun()
+    except Exception as e:
+        st.error(f"Auto-login failed: {e}")
 
 # -----------------------------------------------------
 # 4. SIDEBAR UI
@@ -139,10 +142,10 @@ with st.sidebar:
 
     # --- GOOGLE DRIVE LOGIN ---
     st.subheader("1. Google Drive")
-    if st.session_state.gdrive_creds:
+    if gdrive_creds_object:
         st.success("✅ Connected to Drive")
         if st.button("Logout Drive"):
-            st.session_state.gdrive_creds = None
+            st.session_state.gdrive_creds_json = None
             st.rerun()
     else:
         try:
@@ -158,7 +161,8 @@ with st.sidebar:
             
             if g_code:
                 flow.fetch_token(code=g_code)
-                st.session_state.gdrive_creds = flow.credentials
+                # --- FIX: Save as JSON string so it survives page reloads ---
+                st.session_state.gdrive_creds_json = flow.credentials.to_json()
                 st.rerun()
         except Exception as e:
             st.error(f"Config Error: {e}")
@@ -181,11 +185,9 @@ with st.sidebar:
         bc_auth_url, _ = bc_oauth.authorization_url(BASECAMP_AUTH_URL, type="web_server")
         
         if AUTO_LOGIN_MODE:
-            # Auto Mode: Direct Link
             st.link_button("Login with Basecamp", bc_auth_url, type="primary")
             st.caption("Redirects to Basecamp and back.")
         else:
-            # Manual Mode: Copy Paste
             st.markdown(f"👉 [**Authorize Basecamp**]({bc_auth_url})")
             st.caption("Copy the code from the Google URL bar.")
             bc_code = st.text_input("Paste Basecamp Code:", key="bc_code")
@@ -201,7 +203,12 @@ with st.sidebar:
                     }
                     response = requests.post(BASECAMP_TOKEN_URL, data=payload)
                     response.raise_for_status()
-                    st.session_state.basecamp_token = response.json()
+                    token = response.json()
+                    
+                    st.session_state.basecamp_token = token
+                    real_name = fetch_basecamp_name(token)
+                    if real_name:
+                        st.session_state.user_real_name = real_name
                     st.rerun()
                 except Exception as e:
                     st.error(f"Login failed: {e}")
@@ -241,9 +248,10 @@ def upload_to_gcs(file_path, destination_blob_name):
         return None
 
 def upload_to_drive_user(file_stream, file_name):
-    if not st.session_state.gdrive_creds: return None
+    # Use the global object we hydrated at the start
+    if not gdrive_creds_object: return None
     try:
-        service = build("drive", "v3", credentials=st.session_state.gdrive_creds)
+        service = build("drive", "v3", credentials=gdrive_creds_object)
         file_metadata = {"name": file_name} 
         media = MediaIoBaseUpload(
             file_stream, mimetype="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
@@ -565,7 +573,7 @@ with tab2:
         else:
             st.warning("⚠️ Please log in to Basecamp in the sidebar first.")
 
-    if do_drive and not st.session_state.gdrive_creds:
+    if do_drive and not st.session_state.gdrive_creds_json:
         st.warning("⚠️ Please log in to Google Drive in the sidebar first.")
 
     if st.button("Generate Word Doc"):
@@ -581,7 +589,7 @@ with tab2:
         if not date_str or not prepared_by or not client_rep:
             st.error("Missing required fields (*)")
         elif not do_basecamp or basecamp_ready:
-            if do_drive and not st.session_state.gdrive_creds:
+            if do_drive and not gdrive_creds_object:
                 st.error("Google Drive not connected.")
             else:
                 try:
@@ -606,7 +614,7 @@ with tab2:
                     bio.seek(0)
                     fname = f"Minutes_{date_str}.docx"
                     
-                    if do_drive and st.session_state.gdrive_creds:
+                    if do_drive and gdrive_creds_object:
                         with st.spinner("Uploading to Drive..."):
                             if upload_to_drive_user(bio, fname): st.success("Uploaded to Drive!")
                             else: st.error("Drive upload failed.")
@@ -669,13 +677,13 @@ with tab3:
                                 yield chunk.text
 
                     try:
-                        # --- FINAL "SECRETARY PERSONA" PROMPT ---
+                        # --- FINAL "OFFICIAL LOG" STYLE PROMPT ---
                         full_prompt = f"""
-                        You are an efficient, professional meeting secretary.
+                        You are an efficient, action-oriented meeting secretary who was present at this meeting.
                         
                         CONTEXT (PARTICIPANTS):
                         {participants_context}
-                        (These are the real names. Map "Speaker X" to these names based on conversation flow.)
+                        (These are the real names. Map "Speaker X" to these real names based on the conversation flow.)
 
                         TRANSCRIPT:
                         {transcript_context}
@@ -684,13 +692,15 @@ with tab3:
                         {prompt}
                         
                         STRICT RULES:
-                        1. **Passive/Professional Voice:** Focus on the action/decision, NOT the speaker, unless it is a direct assignment.
-                           - BAD: "John said the font is too small."
-                           - GOOD: "The font size needs to be increased." (Focus on the task)
-                           - GOOD: "The Client requested a larger font." (Focus on the role)
-                        2. **No Speaker IDs:** NEVER use "Speaker 1" or "Speaker 2".
-                        3. **Accuracy:** Use the transcript as your only source. If not mentioned, say "That was not discussed."
-                        4. **Conciseness:** Be brief and clear.
+                        1. **Voice:** Write as if you are recording the official minutes/log. Use professional, objective language.
+                        2. **Action-First Phrasing:** Prioritize the *action* or *decision* over who said it, unless the person is critical context.
+                           - BAD: "John wants the font to be blue."
+                           - GOOD: "The font needs to be changed to blue." (Passive voice / Action focus)
+                           - GOOD: "The Client requires a change to the header image." (Role focus)
+                        3. **No Speaker IDs:** NEVER use "Speaker 1", "Speaker 2". Use real names or roles (Client/Company Rep).
+                        4. **Generalization:** Do not assume names are "John". Use the names provided in the CONTEXT list.
+                        5. If the answer is not in the transcript, say "That was not discussed."
+                        6. Be concise.
                         """
                         
                         stream_iterator = gemini_model.generate_content(full_prompt, stream=True)
