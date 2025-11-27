@@ -1,8 +1,8 @@
 import streamlit as st
+import streamlit.components.v1 as components
 import os
 
 # --- FIX: ALLOW OAUTH TO RUN ON STREAMLIT CLOUD ---
-# This silences the "InsecureTransportError"
 os.environ['OAUTHLIB_INSECURE_TRANSPORT'] = '1'
 
 import tempfile
@@ -158,9 +158,11 @@ with st.sidebar:
         bc_auth_url, _ = bc_oauth.authorization_url(BASECAMP_AUTH_URL, type="web_server")
         
         if AUTO_LOGIN_MODE:
-            # --- FIX: Use Native Streamlit Link Button (100% Reliable) ---
-            st.link_button("Login to Basecamp", bc_auth_url, type="primary")
-            st.caption("Opens a new tab to authorize.")
+            # --- RELIABLE JS REDIRECT ---
+            if st.button("Login to Basecamp", type="primary"):
+                js = f"<script>window.top.location.href = '{bc_auth_url}';</script>"
+                components.html(js, height=0)
+            st.caption("Redirects to Basecamp in this tab.")
         else:
             st.warning("Auto-login not configured in Secrets.")
             st.markdown(f"👉 [**Authorize Basecamp**]({bc_auth_url})")
@@ -207,7 +209,7 @@ with st.sidebar:
                 )
                 auth_url, _ = flow.authorization_url(prompt='consent')
                 
-                st.link_button("Login to Google Drive", auth_url)
+                st.markdown(f"👉 [**Click to Authorize Drive**]({auth_url})")
                 g_code = st.text_input("Paste Google Code:", key="g_code")
                 
                 if g_code:
@@ -219,8 +221,19 @@ with st.sidebar:
                 st.error(f"Config Error: {e}")
 
 # -----------------------------------------------------
-# 5. API CLIENTS (ROBOT) SETUP
+# 5. SECURITY CHECK: IS USER FULLY LOGGED IN?
 # -----------------------------------------------------
+# Only proceed if BOTH Basecamp and Google Drive are connected
+if not (st.session_state.basecamp_token and st.session_state.gdrive_creds):
+    st.title("🔒 Access Restricted")
+    st.warning("Please log in to **Basecamp** and **Google Drive** in the sidebar to unlock the AI Meeting Manager.")
+    st.stop() # Halts the script here. The rest of the UI will NOT load.
+
+# =====================================================
+#     MAIN APP LOGIC (Only runs if unlocked)
+# =====================================================
+
+# --- API CLIENTS (ROBOT) SETUP ---
 try:
     sa_creds = service_account.Credentials.from_service_account_info(GCP_SERVICE_ACCOUNT_JSON)
     storage_client = storage.Client(credentials=sa_creds)
