@@ -1,11 +1,7 @@
 import streamlit as st
-import streamlit.components.v1 as components # --- NEW IMPORT for JS Redirect ---
-import os
-
-# --- FIX: ALLOW OAUTH TO RUN ON STREAMLIT CLOUD ---
-os.environ['OAUTHLIB_INSECURE_TRANSPORT'] = '1'
-
+import streamlit.components.v1 as components # --- REQUIRED FOR REDIRECT ---
 import tempfile
+import os
 from docx import Document
 import io
 import time
@@ -158,14 +154,12 @@ with st.sidebar:
         bc_auth_url, _ = bc_oauth.authorization_url(BASECAMP_AUTH_URL, type="web_server")
         
         if AUTO_LOGIN_MODE:
-            # --- RELIABLE JS REDIRECT ---
+            # --- JS REDIRECT FIX ---
+            # This button triggers a rerun, which injects JS to force navigation
             if st.button("Login to Basecamp", type="primary"):
-                # This injects a script to force the browser to navigate in the SAME tab
-                # It breaks out of Streamlit's iframe sandbox effectively
                 js = f"<script>window.top.location.href = '{bc_auth_url}';</script>"
                 components.html(js, height=0)
-                
-            st.caption("Redirects to Basecamp in this tab.")
+            st.caption("You must log in to Basecamp first.")
         else:
             st.warning("Auto-login not configured in Secrets.")
             st.markdown(f"👉 [**Authorize Basecamp**]({bc_auth_url})")
@@ -523,7 +517,10 @@ with tab2:
         absent = st.text_input("Absent")
     with row2:
         time_obj = st.text_input("Time", value=sg_now.strftime("%I:%M %p"))
+        
+        # --- AUTO FILL PREPARED BY ---
         default_prepared_by = st.session_state.user_real_name if st.session_state.user_real_name else st.session_state.auto_ifoundries_reps
+        
         prepared_by = st.text_input("Prepared by", value=default_prepared_by)
         ifoundries_rep = st.text_input("iFoundries Reps", value=st.session_state.auto_ifoundries_reps)
     
@@ -672,6 +669,7 @@ with tab3:
                                 yield chunk.text
 
                     try:
+                        # --- FINAL "OFFICIAL LOG" STYLE PROMPT ---
                         full_prompt = f"""
                         You are an efficient, action-oriented meeting secretary.
                         
