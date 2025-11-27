@@ -46,7 +46,6 @@ try:
     STREAMLIT_APP_URL = st.secrets.get("STREAMLIT_APP_URL", None)
     
     if STREAMLIT_APP_URL:
-        # Remove trailing slash to avoid mismatch errors
         BASECAMP_REDIRECT_URI = STREAMLIT_APP_URL.rstrip("/")
         AUTO_LOGIN_MODE = True
     else:
@@ -85,9 +84,8 @@ def fetch_basecamp_name(token_dict):
     return ""
 
 # -----------------------------------------------------
-# 3. SESSION STATE & AUTO-LOGIN HANDLER
+# 3. STATE & AUTO-LOGIN HANDLER
 # -----------------------------------------------------
-
 if 'gdrive_creds' not in st.session_state:
     st.session_state.gdrive_creds = None
 if 'basecamp_token' not in st.session_state:
@@ -95,7 +93,7 @@ if 'basecamp_token' not in st.session_state:
 if 'user_real_name' not in st.session_state:
     st.session_state.user_real_name = ""
 
-# --- HANDLE RETURN FROM BASECAMP ---
+# Check for Basecamp Return Code
 if AUTO_LOGIN_MODE and "code" in st.query_params and not st.session_state.basecamp_token:
     auth_code = st.query_params["code"]
     try:
@@ -106,7 +104,6 @@ if AUTO_LOGIN_MODE and "code" in st.query_params and not st.session_state.baseca
             "redirect_uri": BASECAMP_REDIRECT_URI,
             "code": auth_code
         }
-        # Manual POST to ensure strict parameter handling
         response = requests.post(BASECAMP_TOKEN_URL, data=payload)
         response.raise_for_status()
         token = response.json()
@@ -117,103 +114,84 @@ if AUTO_LOGIN_MODE and "code" in st.query_params and not st.session_state.baseca
         if real_name:
             st.session_state.user_real_name = real_name
             
-        # Clear URL
         st.query_params.clear()
-        st.toast("✅ Basecamp Auto-Login Successful!", icon="🎉")
-        # No rerun needed, state is set
-        
+        st.toast("✅ Basecamp Login Successful!", icon="🎉")
+        time.sleep(1)
+        st.rerun()
     except Exception as e:
         st.error(f"Auto-login failed: {e}")
 
 # -----------------------------------------------------
-# 4. SIDEBAR UI
+# 4. SIDEBAR UI (ENFORCED WORKFLOW)
 # -----------------------------------------------------
 with st.sidebar:
     st.title("🔐 Login")
     
-    # --- ORDER WARNING ---
-    # Because Basecamp redirects (reloading the page), it clears other sessions.
-    # We guide the user to do Basecamp FIRST.
-    if not st.session_state.basecamp_token:
-        st.info("💡 **Tip:** Login to Basecamp *first*.")
-
-    # --- 1. BASECAMP LOGIN (First for stability) ---
-    st.subheader("1. Basecamp")
+    # --- STEP 1: BASECAMP (Must happen first) ---
+    st.markdown("### Step 1: Basecamp")
+    
     if st.session_state.basecamp_token:
-        st.success(f"✅ Connected")
-        if st.session_state.user_real_name:
-            st.caption(f"👤 {st.session_state.user_real_name}")
+        st.success(f"✅ Connected as {st.session_state.user_real_name}")
         if st.button("Logout Basecamp"):
             st.session_state.basecamp_token = None
             st.session_state.user_real_name = ""
+            st.session_state.gdrive_creds = None
             st.rerun()
     else:
         bc_oauth = OAuth2Session(BASECAMP_CLIENT_ID, redirect_uri=BASECAMP_REDIRECT_URI)
         bc_auth_url, _ = bc_oauth.authorization_url(BASECAMP_AUTH_URL, type="web_server")
         
         if AUTO_LOGIN_MODE:
-            # --- THE FIX FOR CLOSING TABS ---
-            # Using HTML <a target="_self"> forces it to open in the SAME tab
+            # --- FIXED HTML BLOCK ---
             st.markdown(f"""
-            <a href="{bc_auth_url}" target="_self" style="
-                display: inline-block;
-                padding: 0.5em 1em;
-                color: white;
-                background-color: #ff4b4b;
-                border-radius: 4px;
-                text-decoration: none;
-                font-weight: bold;
-            ">Login with Basecamp</a>
+            <a href="{bc_auth_url}" target="_self">
+                <button style="
+                    background-color:#ff4b4b; 
+                    color:white; 
+                    border:none; 
+                    padding:0.5rem 1rem; 
+                    border-radius:0.5rem; 
+                    cursor:pointer;
+                    font-weight:bold;">
+                    Login to Basecamp
+                </button>
+            </a>
             """, unsafe_allow_html=True)
+            st.caption("You must log in to Basecamp first.")
         else:
-            st.markdown(f"👉 [**Authorize Basecamp**]({bc_auth_url})")
-            bc_code = st.text_input("Paste Basecamp Code:", key="bc_code")
-            if bc_code:
-                try:
-                    payload = {
-                        "type": "web_server",
-                        "client_id": BASECAMP_CLIENT_ID,
-                        "client_secret": BASECAMP_CLIENT_SECRET,
-                        "redirect_uri": BASECAMP_REDIRECT_URI,
-                        "code": bc_code
-                    }
-                    response = requests.post(BASECAMP_TOKEN_URL, data=payload)
-                    response.raise_for_status()
-                    st.session_state.basecamp_token = response.json()
-                    
-                    real_name = fetch_basecamp_name(st.session_state.basecamp_token)
-                    if real_name: st.session_state.user_real_name = real_name
-                    st.rerun()
-                except Exception as e:
-                    st.error(f"Login failed: {e}")
+            st.warning("Auto-login not configured in Secrets.")
 
     st.divider()
 
-    # --- 2. GOOGLE DRIVE LOGIN (Manual Copy-Paste preserves session) ---
-    st.subheader("2. Google Drive")
-    if st.session_state.gdrive_creds:
-        st.success("✅ Connected")
-        if st.button("Logout Drive"):
-            st.session_state.gdrive_creds = None
-            st.rerun()
+    # --- STEP 2: GOOGLE DRIVE ---
+    st.markdown("### Step 2: Google Drive")
+    
+    if not st.session_state.basecamp_token:
+        st.info("🔒 Please complete Step 1 first.")
     else:
-        try:
-            flow = Flow.from_client_config(
-                GDRIVE_CLIENT_CONFIG,
-                scopes=["https://www.googleapis.com/auth/drive"],
-                redirect_uri="urn:ietf:wg:oauth:2.0:oob"
-            )
-            auth_url, _ = flow.authorization_url(prompt='consent')
-            
-            st.markdown(f"👉 [**Authorize Google Drive**]({auth_url})")
-            g_code = st.text_input("Paste Google Code:", key="g_code")
-            
-            if g_code:
-                flow.fetch_token(code=g_code)
-                st.session_state.gdrive_creds = flow.credentials
+        if st.session_state.gdrive_creds:
+            st.success("✅ Connected")
+            if st.button("Logout Drive"):
+                st.session_state.gdrive_creds = None
                 st.rerun()
-        except Exception as e:
-            st.error(f"Config Error: {e}")
+        else:
+            try:
+                flow = Flow.from_client_config(
+                    GDRIVE_CLIENT_CONFIG,
+                    scopes=["https://www.googleapis.com/auth/drive"],
+                    redirect_uri="urn:ietf:wg:oauth:2.0:oob"
+                )
+                auth_url, _ = flow.authorization_url(prompt='consent')
+                
+                st.markdown(f"👉 [**Click to Authorize Drive**]({auth_url})")
+                g_code = st.text_input("Paste Google Code:", key="g_code")
+                
+                if g_code:
+                    flow.fetch_token(code=g_code)
+                    st.session_state.gdrive_creds = flow.credentials
+                    st.rerun()
+            except Exception as e:
+                st.error(f"Config Error: {e}")
 
 # -----------------------------------------------------
 # 5. API CLIENTS (ROBOT) SETUP
@@ -224,7 +202,6 @@ try:
     speech_client = speech.SpeechClient(credentials=sa_creds)
     
     genai.configure(api_key=GOOGLE_API_KEY)
-    # Locked model as requested
     gemini_model = genai.GenerativeModel('gemini-2.5-flash-lite')
 except Exception as e:
     st.error(f"System Error (AI Services): {e}")
@@ -305,6 +282,8 @@ def create_bc_todo(_session, project_id, todolist_id, title, attachment_sgid):
         return False
 
 def get_structured_notes_google(audio_file_path, file_name, participants_context):
+    flac_file_path = ""
+    flac_blob_name = ""
     try:
         with st.spinner(f"Converting {file_name} to audio-only FLAC..."):
             base_name = os.path.splitext(audio_file_path)[0]
@@ -486,7 +465,6 @@ with tab1:
             st.session_state.chat_history = [] 
             st.session_state.saved_participants_input = participants_input 
             
-            # Auto-fill logic
             c_list = [l.replace("(Client)","").strip() for l in participants_input.split('\n') if "(Client)" in l]
             i_list = [l.replace("(iFoundries)","").strip() for l in participants_input.split('\n') if "(iFoundries)" in l]
             st.session_state.auto_client_reps = "\n".join(c_list)
@@ -664,11 +642,11 @@ with tab3:
 
                     try:
                         full_prompt = f"""
-                        You are an efficient, action-oriented meeting secretary who was present at this meeting.
+                        You are an efficient, action-oriented meeting secretary.
                         
                         CONTEXT (PARTICIPANTS):
                         {participants_context}
-                        (These are the real names. Map "Speaker X" to these real names based on the conversation flow.)
+                        (Use this to map "Speaker X" to real names.)
 
                         TRANSCRIPT:
                         {transcript_context}
@@ -677,15 +655,13 @@ with tab3:
                         {prompt}
                         
                         STRICT RULES:
-                        1. **Voice:** Write as if you are recording the official minutes/log. Use professional, objective language.
-                        2. **Action-First Phrasing:** Prioritize the *action* or *decision* over who said it, unless the person is critical context.
-                           - BAD: "John wants the font to be blue."
-                           - GOOD: "The font needs to be changed to blue." (Passive voice / Action focus)
-                           - GOOD: "The Client requires a change to the header image." (Role focus)
-                        3. **No Speaker IDs:** NEVER use "Speaker 1", "Speaker 2". Use real names or roles (Client/Company Rep).
-                        4. **Generalization:** Do not assume names are "John". Use the names provided in the CONTEXT list.
-                        5. If the answer is not in the transcript, say "That was not discussed."
-                        6. Be concise.
+                        1. **Passive/Professional Voice:** Focus on the action/decision, NOT the speaker, unless it is a direct assignment.
+                           - BAD: "John said the font is too small."
+                           - GOOD: "The font size needs to be increased." (Focus on the task)
+                           - GOOD: "The Client requested a larger font." (Focus on the role)
+                        2. **No Speaker IDs:** NEVER use "Speaker 1" or "Speaker 2".
+                        3. **Accuracy:** Use the transcript as your only source. If not mentioned, say "That was not discussed."
+                        4. **Conciseness:** Be brief and clear.
                         """
                         
                         stream_iterator = gemini_model.generate_content(full_prompt, stream=True)
@@ -693,4 +669,4 @@ with tab3:
                         
                         st.session_state.chat_history.append({"role": "assistant", "content": response})
                     except Exception as e:
-                        st.error("I couldn't generate a response. Please try again.")
+                        st.error("I couldn't generate a response. Please try again.")S
