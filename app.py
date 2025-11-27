@@ -155,7 +155,7 @@ with st.sidebar:
         if AUTO_LOGIN_MODE:
             # --- THE FIX: PURE HTML LINK WITH TARGET=_TOP ---
             # No nested buttons. Just a styled <a> tag.
-            st.markdown(f"""
+            st.markdown("""
             <a href="{bc_auth_url}" target="_top" style="
                 display: block;
                 width: 100%;
