@@ -159,7 +159,7 @@ with st.sidebar:
         bc_auth_url, _ = bc_oauth.authorization_url(BASECAMP_AUTH_URL, type="web_server")
         
         if AUTO_LOGIN_MODE:
-            # Use native button for reliability
+            # Native Streamlit Link Button
             st.link_button("Login to Basecamp", bc_auth_url, type="primary")
             st.caption("Opens in a new tab. Close it after logging in.")
         else:
@@ -224,8 +224,7 @@ with st.sidebar:
 # -----------------------------------------------------
 if not (st.session_state.basecamp_token and st.session_state.gdrive_creds):
     st.title("🔒 Access Restricted")
-    st.warning("Please complete the login process in the **sidebar** (Left) to unlock the AI Meeting Manager.")
-    st.info("1. Login to **Basecamp**\n2. Login to **Google Drive**")
+    st.warning("Please log in to **Basecamp** and **Google Drive** in the sidebar to unlock the AI Meeting Manager.")
     st.stop() 
 
 # =====================================================
@@ -245,7 +244,7 @@ except Exception as e:
     st.stop()
 
 # -----------------------------------------------------
-# 6. HELPER FUNCTIONS (DOC PARSING)
+# 6. HELPER FUNCTIONS
 # -----------------------------------------------------
 
 def add_markdown_to_doc(doc, text):
@@ -334,6 +333,7 @@ def upload_to_gcs(file_path, destination_blob_name):
         st.error(f"GCS Upload Error: {e}")
         return None
 
+# --- SMART FOLDER CREATION ---
 def get_or_create_folder(service, folder_name):
     try:
         query = f"mimeType='application/vnd.google-apps.folder' and name='{folder_name}' and trashed=false"
@@ -346,14 +346,19 @@ def get_or_create_folder(service, folder_name):
             return folder.get('id')
     except Exception as e: return None
 
+# --- FIXED: Upload to Specific Folder ---
 def upload_to_drive_user(file_stream, file_name, target_folder_name):
     if not st.session_state.gdrive_creds: return None
     try:
         service = build("drive", "v3", credentials=st.session_state.gdrive_creds)
+        
+        # Find or Create the folder
         folder_id = get_or_create_folder(service, target_folder_name)
-        if not folder_id: return None
+        
+        # Fallback to root if folder creation fails
+        parents = [folder_id] if folder_id else []
 
-        file_metadata = {"name": file_name, "parents": [folder_id]}
+        file_metadata = {"name": file_name, "parents": parents}
         media = MediaIoBaseUpload(
             file_stream, mimetype="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
         )
@@ -476,6 +481,7 @@ def get_structured_notes_google(audio_file_path, file_name, participants_context
             full_transcript_text = " ".join([result.alternatives[0].transcript for result in response.results])
 
         with st.spinner("Analyzing conversation & matching names..."):
+            # --- UPDATED PROMPT FOR SPECIFIC ACTIONS ---
             prompt = f"""
             You are an expert meeting secretary. 
             Here is the context of who was in the meeting:
@@ -495,10 +501,12 @@ def get_structured_notes_google(audio_file_path, file_name, participants_context
             * **Wording & Tone:** John requested avoiding the casual use of "You are".
             * Bullet point 3.
             (Leave a blank line between sections)
+            
             ## NEXT STEPS ##
-            List action items using the real names.
+            List highly specific, actionable items. Avoid vague summaries.
             FORMAT:
-            * Bullet point 1.
+            * **Action:** [Specific Task] (Assigned to: [Name]) - Deadline: [Time if mentioned]
+            
             ## CLIENT REQUESTS ##
             List specific questions or requests asked BY the Client.
             FORMAT:
@@ -733,6 +741,7 @@ with tab2:
                 fname = f"Minutes_{date_str}.docx"
                 
                 if do_drive and st.session_state.gdrive_creds:
+                    # --- FIX: UPLOAD TO NAMED FOLDER ---
                     with st.spinner("Uploading to Drive ('Meeting Notes' folder)..."):
                         if upload_to_drive_user(bio, fname, "Meeting Notes"): st.success("✅ Uploaded to Drive!")
                         else: st.error("Drive upload failed.")
