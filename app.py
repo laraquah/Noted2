@@ -667,4 +667,4 @@ with tab3:
                         
                         st.session_state.chat_history.append({"role": "assistant", "content": response})
                     except Exception as e:
-                        st.error("I couldn't generate a response. Please try again.")S
+                        st.error("I couldn't generate a response. Please try again.")
