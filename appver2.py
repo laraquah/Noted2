@@ -2,10 +2,6 @@ import streamlit as st
 import streamlit.components.v1 as components
 import os
 import shutil
-
-# --- FIX: ALLOW OAUTH TO RUN ON STREAMLIT CLOUD ---
-os.environ['OAUTHLIB_INSECURE_TRANSPORT'] = '1'
-
 import tempfile
 from docx import Document
 from docx.shared import Pt, Inches, RGBColor
@@ -17,6 +13,11 @@ import json
 import datetime
 import pytz
 import re
+import requests
+from requests_oauthlib import OAuth2Session
+
+# --- FIX: ALLOW OAUTH TO RUN ON STREAMLIT CLOUD ---
+os.environ['OAUTHLIB_INSECURE_TRANSPORT'] = '1'
 
 # Import Google Cloud Libraries
 from google.cloud import speech
@@ -29,10 +30,6 @@ from google_auth_oauthlib.flow import Flow
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseUpload, MediaIoBaseDownload
 from google.oauth2 import service_account
-
-# --- Import Basecamp & formatting tools ---
-import requests
-from requests_oauthlib import OAuth2Session
 
 # -----------------------------------------------------
 # 1. CONSTANTS & CONFIGURATION
@@ -299,7 +296,7 @@ def get_structured_notes_google(audio_file_path, file_name, participants_context
             full_transcript += w.word + " "
 
         with st.spinner("Analyzing with Gemini..."):
-            # --- UPDATED PROMPT FOR OVERVIEW & MERGED REQUESTS ---
+            # --- UPDATED PROMPT: MERGE REQUESTS INTO NEXT STEPS ---
             prompt = f"""
             You are an expert meeting secretary. Context: {participants_context}
             Transcript: {full_transcript}
@@ -314,10 +311,12 @@ def get_structured_notes_google(audio_file_path, file_name, participants_context
                [Detailed bullet points with headers]
                
                ## NEXT STEPS ##
-               List highly specific, actionable items. **Convert any specific client requests into action items here.**
+               List ALL specific, actionable items. **CRITICAL: Take any specific requests made by the Client and convert them into Action Items here.**
                FORMAT:
                * **Action:** [Specific Task] (Assigned to: [Name]) - Deadline: [Time if mentioned]
-               * **Action:** [Client Request] (Assigned to: [Name]) - Deadline: [Time if mentioned]
+               
+               ## CLIENT REQUESTS ##
+               [Leave this section empty if you moved everything to Next Steps, otherwise list pending questions]
             """
             text = gemini_model.generate_content(prompt).text
             
@@ -329,6 +328,7 @@ def get_structured_notes_google(audio_file_path, file_name, participants_context
                 if "## OVERVIEW ##" in text: overview = text.split("## OVERVIEW ##")[1].split("## DISCUSSION ##")[0].strip()
                 if "## DISCUSSION ##" in text: discussion = text.split("## DISCUSSION ##")[1].split("## NEXT STEPS ##")[0].strip()
                 if "## NEXT STEPS ##" in text: next_steps = text.split("## NEXT STEPS ##")[1].strip()
+                # We ignore separate Client Requests section as it is merged
             except: discussion = text
 
             return {"overview": overview, "discussion": discussion, "next_steps": next_steps, "full_transcript": full_transcript}
@@ -339,7 +339,6 @@ def get_structured_notes_google(audio_file_path, file_name, participants_context
 
 # --- Markdown Parsers ---
 def _add_rich_text(paragraph, text):
-    """Parses markdown-style **bold** text and applies Word formatting."""
     parts = re.split(r'(\*\*.*?\*\*)', text)
     for part in parts:
         if part.startswith('**') and part.endswith('**'):
@@ -349,7 +348,6 @@ def _add_rich_text(paragraph, text):
             paragraph.add_run(part)
 
 def add_formatted_text(cell, text):
-    """Enhanced parser to handle bullets and bold text correctly in Word table cells."""
     cell.text = ""
     lines = text.split('\n')
     for line in lines:
@@ -367,7 +365,6 @@ def add_formatted_text(cell, text):
             p.paragraph_format.space_before = Pt(8)
         elif line.startswith('*') or line.startswith('-'):
             clean_text = line.lstrip('*- ').strip()
-            # Use a bullet character since Word tables don't support list styles easily
             p.text = "• "
             _add_rich_text(p, clean_text)
             p.paragraph_format.left_indent = Inches(0.15)
