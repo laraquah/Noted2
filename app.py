@@ -1,7 +1,6 @@
 import streamlit as st
 import streamlit.components.v1 as components
 import os
-import shutil
 
 # --- FIX: ALLOW OAUTH TO RUN ON STREAMLIT CLOUD ---
 os.environ['OAUTHLIB_INSECURE_TRANSPORT'] = '1'
@@ -27,7 +26,7 @@ import google.generativeai as genai
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import Flow
 from googleapiclient.discovery import build
-from googleapiclient.http import MediaIoBaseUpload, MediaIoBaseDownload
+from googleapiclient.http import MediaIoBaseUpload
 from google.oauth2 import service_account
 
 # --- Import Basecamp & formatting tools ---
@@ -100,16 +99,6 @@ if 'basecamp_token' not in st.session_state:
 if 'user_real_name' not in st.session_state:
     st.session_state.user_real_name = ""
 
-# --- METADATA STATES ---
-if 'detected_date' not in st.session_state:
-    st.session_state.detected_date = None
-if 'detected_time' not in st.session_state:
-    st.session_state.detected_time = None
-if 'detected_title' not in st.session_state:
-    st.session_state.detected_title = "Meeting_Minutes"
-if 'detected_venue' not in st.session_state:
-    st.session_state.detected_venue = ""
-
 # --- FIX: IMMEDIATE GOOGLE RE-LOGIN ---
 if 'gdrive_creds_json' in st.session_state and st.session_state.gdrive_creds_json and not st.session_state.gdrive_creds:
     try:
@@ -170,7 +159,7 @@ with st.sidebar:
         bc_auth_url, _ = bc_oauth.authorization_url(BASECAMP_AUTH_URL, type="web_server")
         
         if AUTO_LOGIN_MODE:
-            # Native Streamlit Link Button
+            # Use native button for reliability
             st.link_button("Login to Basecamp", bc_auth_url, type="primary")
             st.caption("Opens in a new tab. Close it after logging in.")
         else:
@@ -255,7 +244,7 @@ except Exception as e:
     st.stop()
 
 # -----------------------------------------------------
-# 6. HELPER FUNCTIONS
+# 6. HELPER FUNCTIONS (DOC PARSING)
 # -----------------------------------------------------
 
 def add_markdown_to_doc(doc, text):
@@ -263,11 +252,13 @@ def add_markdown_to_doc(doc, text):
     lines = text.split('\n')
     table_row_pattern = re.compile(r"^\|(.+)\|")
     table_sep_pattern = re.compile(r"^\|[-:| ]+\|")
+    
     table_data = []
     in_table = False
 
     for line in lines:
         stripped = line.strip()
+        
         if table_row_pattern.match(stripped):
             if not table_sep_pattern.match(stripped):
                 cells = [c.strip() for c in stripped.strip('|').split('|')]
@@ -324,87 +315,6 @@ def _add_rich_text(paragraph, text):
         else:
             paragraph.add_run(part)
 
-# --- AI VISUAL METADATA EXTRACTION ---
-def get_visual_metadata(file_path):
-    """
-    Uses Gemini Vision to read:
-    1. Date & Time
-    2. Meeting Title (Center text)
-    3. Venue (Corner text)
-    Returns a dict with keys: datetime_sg, duration, title, venue
-    """
-    if shutil.which("ffmpeg") is None: return None
-    
-    thumbnail_path = "temp_thumb.jpg"
-    result_data = {
-        "datetime_sg": None,
-        "duration": 0,
-        "title": "Meeting_Minutes",
-        "venue": ""
-    }
-
-    try:
-        # A. Get Duration using ffprobe
-        command = ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", file_path]
-        result = subprocess.run(command, capture_output=True, text=True)
-        if result.returncode == 0:
-            try:
-                result_data["duration"] = float(result.stdout.strip())
-            except: pass
-
-        # B. Get Visuals using Vision
-        subprocess.run([
-            'ffmpeg', '-i', file_path, '-ss', '00:00:01', 
-            '-vframes', '1', '-q:v', '2', '-y', thumbnail_path
-        ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-
-        if os.path.exists(thumbnail_path):
-            vision_model = genai.GenerativeModel('gemini-2.5-flash-lite')
-            with open(thumbnail_path, "rb") as img_file:
-                img_data = img_file.read()
-
-            prompt = """
-            Analyze this meeting screenshot. Return a JSON object with these keys:
-            - "datetime": The date and time shown (format YYYY-MM-DD HH:MM).
-            - "title": The large central text indicating the meeting name (e.g. 'Company A x Company B').
-            - "venue": The platform name usually in the top right/left corner (e.g. 'Microsoft Teams', 'Zoom').
-            
-            If any value is not found, return "None" for that value.
-            Return ONLY raw JSON.
-            """
-            
-            response = vision_model.generate_content([
-                {'mime_type': 'image/jpeg', 'data': img_data}, 
-                prompt
-            ])
-            
-            try:
-                text = response.text.strip().replace("```json", "").replace("```", "")
-                data = json.loads(text)
-                
-                if data.get("title") and data["title"] != "None":
-                    result_data["title"] = data["title"].replace(" ", "_").replace("/", "-") # Sanitize for filename
-                
-                if data.get("venue") and data["venue"] != "None":
-                    result_data["venue"] = data["venue"]
-                    
-                dt_str = data.get("datetime")
-                if dt_str and dt_str != "None":
-                     dt_obj = datetime.datetime.strptime(dt_str, "%Y-%m-%d %H:%M")
-                     dt_obj = dt_obj.replace(tzinfo=datetime.timezone.utc)
-                     sg_tz = pytz.timezone('Asia/Singapore')
-                     result_data["datetime_sg"] = dt_obj.astimezone(sg_tz)
-            except Exception as e:
-                print(f"JSON Parse Error: {e}")
-
-    except Exception as e:
-        print(f"Visual Metadata Error: {e}")
-    finally:
-        if os.path.exists(thumbnail_path):
-            os.remove(thumbnail_path)
-            
-    return result_data
-
 # --- Standard Helpers ---
 
 def get_basecamp_session_user():
@@ -423,6 +333,7 @@ def upload_to_gcs(file_path, destination_blob_name):
         st.error(f"GCS Upload Error: {e}")
         return None
 
+# --- SMART FOLDER CREATION ---
 def get_or_create_folder(service, folder_name):
     try:
         query = f"mimeType='application/vnd.google-apps.folder' and name='{folder_name}' and trashed=false"
@@ -440,6 +351,7 @@ def upload_to_drive_user(file_stream, file_name, target_folder_name):
     try:
         service = build("drive", "v3", credentials=st.session_state.gdrive_creds)
         folder_id = get_or_create_folder(service, target_folder_name)
+        # If folder fails, fallback to root
         parents = [folder_id] if folder_id else []
 
         file_metadata = {"name": file_name, "parents": parents}
@@ -453,46 +365,6 @@ def upload_to_drive_user(file_stream, file_name, target_folder_name):
     except Exception as e:
         st.error(f"Google Drive Upload Error: {e}")
         return None
-
-def save_analysis_data_to_drive(data_dict, filename):
-    if not st.session_state.gdrive_creds: return None
-    try:
-        service = build("drive", "v3", credentials=st.session_state.gdrive_creds)
-        folder_id = get_or_create_folder(service, "Meeting_Data")
-        if not folder_id: return None
-
-        json_str = json.dumps(data_dict, indent=2)
-        fh = io.BytesIO(json_str.encode('utf-8'))
-        file_metadata = {"name": filename, "parents": [folder_id]}
-        media = MediaIoBaseUpload(fh, mimetype='application/json')
-        file = service.files().create(body=file_metadata, media_body=media, fields="id").execute()
-        return file.get("id")
-    except Exception as e: return None
-
-def list_past_meetings():
-    if not st.session_state.gdrive_creds: return []
-    try:
-        service = build("drive", "v3", credentials=st.session_state.gdrive_creds)
-        folder_id = get_or_create_folder(service, "Meeting_Data")
-        if not folder_id: return []
-        query = f"'{folder_id}' in parents and mimeType='application/json' and trashed=false"
-        results = service.files().list(q=query, fields="files(id, name, createdTime)", orderBy="createdTime desc").execute()
-        return results.get('files', [])
-    except: return []
-
-def load_meeting_data(file_id):
-    if not st.session_state.gdrive_creds: return None
-    try:
-        service = build("drive", "v3", credentials=st.session_state.gdrive_creds)
-        request = service.files().get_media(fileId=file_id)
-        fh = io.BytesIO()
-        downloader = MediaIoBaseDownload(fh, request)
-        done = False
-        while done is False:
-            status, done = downloader.next_chunk()
-        fh.seek(0)
-        return json.load(fh)
-    except Exception as e: return None
 
 def get_basecamp_projects(_session):
     try:
@@ -532,9 +404,11 @@ def post_to_basecamp(_session, project_id, tool_type, tool_id, sub_id, title, co
         if tool_type == "To-dos":
             url = f"{BASECAMP_API_BASE}/buckets/{project_id}/todolists/{sub_id}/todos.json"
             payload = {"content": title, "description": content + attach_html}
+            
         elif tool_type == "Message Board":
             url = f"{BASECAMP_API_BASE}/buckets/{project_id}/message_boards/{tool_id}/messages.json"
             payload = {"subject": title, "content": content + attach_html, "status": "active"}
+            
         elif tool_type == "Docs & Files":
             url = f"{BASECAMP_API_BASE}/buckets/{project_id}/vaults/{tool_id}/uploads.json"
             payload = {"attachable_sgid": attachment_sgid, "base_name": title, "content": content}
@@ -603,7 +477,6 @@ def get_structured_notes_google(audio_file_path, file_name, participants_context
             full_transcript_text = " ".join([result.alternatives[0].transcript for result in response.results])
 
         with st.spinner("Analyzing conversation & matching names..."):
-            # --- SUPER SPECIFIC ACTION PROMPT ---
             prompt = f"""
             You are an expert meeting secretary. 
             Here is the context of who was in the meeting:
@@ -623,12 +496,10 @@ def get_structured_notes_google(audio_file_path, file_name, participants_context
             * **Wording & Tone:** John requested avoiding the casual use of "You are".
             * Bullet point 3.
             (Leave a blank line between sections)
-            
             ## NEXT STEPS ##
-            List highly specific, actionable items. **DO NOT MISS ANY TASKS.**
+            List highly specific, actionable items. Avoid vague summaries.
             FORMAT:
-            * **[Assigned Name]**: [Action Verb] [Specific Details] - Due: [Time if mentioned]
-            
+            * **Action:** [Specific Task] (Assigned to: [Name]) - Deadline: [Time if mentioned]
             ## CLIENT REQUESTS ##
             List specific questions or requests asked BY the Client.
             FORMAT:
@@ -709,19 +580,10 @@ if "auto_ifoundries_reps" not in st.session_state:
     st.session_state.auto_ifoundries_reps = ""
 if "saved_participants_input" not in st.session_state:
     st.session_state.saved_participants_input = ""
-# --- METADATA STATE ---
-if 'detected_date' not in st.session_state:
-    st.session_state.detected_date = None
-if 'detected_time' not in st.session_state:
-    st.session_state.detected_time = None
-if 'detected_title' not in st.session_state:
-    st.session_state.detected_title = "Meeting_Minutes"
-if 'detected_venue' not in st.session_state:
-    st.session_state.detected_venue = ""
 
 st.title("🤖 AI Meeting Manager")
 
-tab1, tab2, tab3, tab4 = st.tabs(["1. Analyze", "2. Review & Export", "3. Chat", "4. History"])
+tab1, tab2, tab3 = st.tabs(["1. Analyze", "2. Review & Export", "3. Chat"])
 
 with tab1:
     st.header("1. Analyze Audio")
@@ -741,28 +603,6 @@ with tab1:
             st.session_state.chat_history = [] 
             st.session_state.saved_participants_input = participants_input 
             
-            # --- METADATA EXTRACTION ---
-            with st.spinner("🕵️‍♀️ Detecting details from screen..."):
-                metadata = get_visual_metadata(path)
-                
-            if metadata and metadata['datetime_sg']:
-                real_start_time = metadata['datetime_sg']
-                duration_secs = metadata['duration']
-                
-                st.session_state.detected_date = real_start_time.date()
-                
-                # Calculate End Time
-                end_time = real_start_time + datetime.timedelta(seconds=duration_secs)
-                time_str = f"{real_start_time.strftime('%I:%M %p')} - {end_time.strftime('%I:%M %p')}"
-                st.session_state.detected_time = time_str
-                
-                if metadata['title']: st.session_state.detected_title = metadata['title']
-                if metadata['venue']: st.session_state.detected_venue = metadata['venue']
-                
-                st.toast(f"📅 Found: {st.session_state.detected_date} | {metadata.get('title')} | {metadata.get('venue')}")
-            else:
-                st.toast("⚠️ Metadata not found. Using defaults.")
-
             c_list = [l.replace("(Client)","").strip() for l in participants_input.split('\n') if "(Client)" in l]
             i_list = [l.replace("(iFoundries)","").strip() for l in participants_input.split('\n') if "(iFoundries)" in l]
             st.session_state.auto_client_reps = "\n".join(c_list)
@@ -772,19 +612,6 @@ with tab1:
             if "error" in res: st.error(res["error"])
             else: 
                 st.session_state.ai_results = res
-                
-                if st.session_state.gdrive_creds:
-                    timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M")
-                    save_data = {
-                        "ai_results": res,
-                        "participants": participants_input,
-                        "date": timestamp,
-                        "detected_title": st.session_state.detected_title
-                    }
-                    fname = f"Data_{uploaded_file.name}_{timestamp}.json"
-                    if save_analysis_data_to_drive(save_data, fname):
-                        st.toast("💾 Meeting data saved to Drive History!")
-
                 st.success("Analysis Complete!")
         else:
             st.warning("Please upload a file first.")
@@ -795,28 +622,19 @@ with tab2:
     sg_tz = pytz.timezone('Asia/Singapore')
     sg_now = datetime.datetime.now(sg_tz)
     
-    # Defaults
-    default_date = st.session_state.detected_date if st.session_state.detected_date else sg_now.date()
-    default_time = st.session_state.detected_time if st.session_state.detected_time else sg_now.strftime("%I:%M %p")
-    default_venue = st.session_state.detected_venue if st.session_state.detected_venue else ""
-    
-    # Intelligent Filename
-    base_title = st.session_state.detected_title if st.session_state.detected_title else "Meeting_Minutes"
-    final_fname = f"{base_title.replace('_',' ')} - {default_date}.docx"
-
     row1, row2 = st.columns(2)
     with row1:
-        date_obj = st.date_input("Date", default_date)
-        venue = st.text_input("Venue", value=default_venue)
+        date_obj = st.date_input("Date", sg_now.date())
+        venue = st.text_input("Venue")
         client_rep = st.text_area("Client Reps", value=st.session_state.auto_client_reps)
         absent = st.text_input("Absent")
     with row2:
-        time_obj = st.text_input("Time", value=default_time)
+        time_obj = st.text_input("Time", value=sg_now.strftime("%I:%M %p"))
         default_prepared_by = st.session_state.user_real_name if st.session_state.user_real_name else st.session_state.auto_ifoundries_reps
         prepared_by = st.text_input("Prepared by", value=default_prepared_by)
         ifoundries_rep = st.text_input("iFoundries Reps", value=st.session_state.auto_ifoundries_reps)
     
-    date_str = date_obj.strftime("%d %B %Y") if date_obj else ""
+    date_str = date_obj.strftime("%d %B %Y")
     time_str = time_obj
     
     discussion_text = st.text_area("Discussion", value=st.session_state.ai_results.get("discussion", ""), height=300)
@@ -861,7 +679,7 @@ with tab2:
                                 selected_list = st.selectbox("Select Todo List", options=[tl[0] for tl in todolists])
                                 if selected_list:
                                     bc_sub_id = next(tl[1] for tl in todolists if tl[0] == selected_list)
-                                    bc_title = st.text_input("To-Do Title", value=f"{base_title.replace('_',' ')} - {date_str}")
+                                    bc_title = st.text_input("To-Do Title", value=f"Meeting Minutes - {date_str}")
                                     bc_content = st.text_area("Description", value="Attached are the minutes from the meeting.")
                             else: st.warning("No To-do lists found.")
                     
@@ -869,14 +687,14 @@ with tab2:
                         mb = next((t for t in project_tools if t['name'] == 'message_board'), None)
                         if mb:
                             bc_tool_id = mb['id']
-                            bc_title = st.text_input("Subject", value=f"{base_title.replace('_',' ')} - {date_str}")
+                            bc_title = st.text_input("Subject", value=f"Meeting Minutes - {date_str}")
                             bc_content = st.text_area("Message Body", value="Hi team,\n\nHere are the minutes from today's meeting.")
                     
                     elif bc_tool_type == "Docs & Files":
                         vault = next((t for t in project_tools if t['name'] == 'vault'), None)
                         if vault:
                             bc_tool_id = vault['id']
-                            bc_title = st.text_input("File Name", value=final_fname)
+                            bc_title = st.text_input("File Name", value=f"Minutes_{date_str}")
                             bc_content = st.text_area("Description (Optional)", value="")
                             
         except Exception as e: st.error(f"Basecamp Error: {e}")
@@ -896,13 +714,6 @@ with tab2:
         elif not do_basecamp or basecamp_ready:
             try:
                 doc = Document("Minutes Of Meeting - Template.docx")
-                
-                # --- 1. REPLACE TITLE ---
-                for p in doc.paragraphs:
-                    if "[Title]" in p.text:
-                        p.text = p.text.replace("[Title]", base_title.replace('_',' '))
-
-                # --- 2. FILL TABLE DATA ---
                 t0 = doc.tables[0]
                 t0.cell(1,1).text = date_str
                 t0.cell(2,1).text = time_str
@@ -913,41 +724,26 @@ with tab2:
                 t0.cell(4,2).text = i_rep_final
                 t0.cell(5,1).text = absent
 
-                # --- 3. INSERT OVERVIEW & DETAILS ---
                 t1 = doc.tables[1]
-                # Overview is typically the first row of the second table or specific cell
-                # Assuming Row 2, Col 1 based on previous prompt (index 1,0 or 1,1 depending on template)
-                # Let's target the Discussion cell for now as standard
-                
-                # Use Overview logic if available from AI results
-                # (Assuming AI generates an "Overview" section, otherwise use Discussion)
                 add_formatted_text(t1.cell(2,1), discussion_text)
                 add_formatted_text(t1.cell(4,1), next_steps_text)
-                
-                # --- 4. ADJOURNMENT TIME ---
-                # Find last row/cell often used for "Meeting adjourned at..."
-                # We'll assume it's a specific cell or append it
-                try:
-                   end_time_only = time_str.split('-')[-1].strip()
-                   t1.cell(5,1).text = f"Meeting adjourned at {end_time_only}"
-                except: pass
-
                 doc.paragraphs[-1].text = f"Prepared by: {prepared_by}"
                 
                 bio = io.BytesIO()
                 doc.save(bio)
                 bio.seek(0)
+                fname = f"Minutes_{date_str}.docx"
                 
                 if do_drive and st.session_state.gdrive_creds:
                     with st.spinner("Uploading to Drive ('Meeting Notes' folder)..."):
-                        if upload_to_drive_user(bio, final_fname, "Meeting Notes"): st.success("✅ Uploaded to Drive!")
+                        if upload_to_drive_user(bio, fname, "Meeting Notes"): st.success("✅ Uploaded to Drive!")
                         else: st.error("Drive upload failed.")
                     bio.seek(0)
 
                 if do_basecamp and basecamp_ready and bc_session_user:
                     with st.spinner(f"Posting to Basecamp ({bc_tool_type})..."):
                         file_bytes = bio.getvalue()
-                        sgid = upload_bc_attachment(bc_session_user, file_bytes, final_fname)
+                        sgid = upload_bc_attachment(bc_session_user, file_bytes, fname)
                         if sgid:
                             if post_to_basecamp(bc_session_user, bc_project_id, bc_tool_type, bc_tool_id, bc_sub_id, bc_title, bc_content, sgid):
                                 st.success(f"✅ Posted to Basecamp!")
@@ -955,7 +751,7 @@ with tab2:
                         else: st.error("Basecamp upload failed.")
                     bio.seek(0)
 
-                st.download_button("Download .docx", bio, final_fname)
+                st.download_button("Download .docx", bio, fname)
                 
             except Exception as e:
                 st.error(f"Error: {e}")
@@ -987,7 +783,7 @@ with tab3:
                     chat_bio = io.BytesIO()
                     chat_doc.save(chat_bio)
                     chat_bio.seek(0)
-                    chat_fname = f"AI_{st.session_state.detected_title}_{date_str}.docx"
+                    chat_fname = f"AI_{date_str}.docx"
                     
                     with st.spinner("Saving chat log..."):
                         if upload_to_drive_user(chat_bio, chat_fname, "Chats"):
@@ -1044,42 +840,3 @@ with tab3:
                         st.session_state.chat_history.append({"role": "assistant", "content": response})
                     except Exception as e:
                         st.error("I couldn't generate a response. Please try again.")
-
-with tab4:
-    st.header("📂 Meeting History")
-    st.caption("Load past meeting analysis to review notes or continue chatting.")
-    
-    if not st.session_state.gdrive_creds:
-        st.info("Please log in to Google Drive to access history.")
-    else:
-        if st.button("🔄 Refresh List"):
-            st.rerun()
-
-        files = list_past_meetings()
-        
-        if not files:
-            st.warning("No past meeting data found in 'Meeting_Data' folder.")
-        else:
-            file_map = {f"{f['name']} ({f.get('createdTime', '')[:10]})": f['id'] for f in files}
-            selected_file = st.selectbox("Select a past meeting:", options=list(file_map.keys()))
-            
-            if st.button("📂 Load Selected Meeting"):
-                file_id = file_map[selected_file]
-                with st.spinner("Loading meeting data..."):
-                    data = load_meeting_data(file_id)
-                    if data:
-                        st.session_state.ai_results = data.get("ai_results", {})
-                        st.session_state.saved_participants_input = data.get("participants", "")
-                        # NEW: Restore detecting title/venue if saved
-                        if "detected_title" in data: st.session_state.detected_title = data["detected_title"]
-                        st.session_state.chat_history = [] 
-                        
-                        p_input = st.session_state.saved_participants_input
-                        c_list = [l.replace("(Client)","").strip() for l in p_input.split('\n') if "(Client)" in l]
-                        i_list = [l.replace("(iFoundries)","").strip() for l in p_input.split('\n') if "(iFoundries)" in l]
-                        st.session_state.auto_client_reps = "\n".join(c_list)
-                        st.session_state.auto_ifoundries_reps = ", ".join(i_list)
-
-                        st.success("Meeting Loaded! Go to Tab 2 (Review) or Tab 3 (Chat).")
-                        time.sleep(1)
-                        st.rerun()
