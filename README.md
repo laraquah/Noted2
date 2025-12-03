@@ -42,7 +42,7 @@ requests-oauthlib
 pytz
 ```
 
-##⚙️ Configuration & Setup Guide
+## ⚙️ Configuration & Setup Guide
 This app requires significant setup in the Google Cloud Console and Basecamp to function.
 
 1. Google Cloud Platform (GCP) Setup
