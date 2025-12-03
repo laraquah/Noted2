@@ -1,7 +1,7 @@
 import streamlit as st
 import streamlit.components.v1 as components
 import os
-import shutil # Required for checking ffmpeg
+import shutil
 
 # --- FIX: ALLOW OAUTH TO RUN ON STREAMLIT CLOUD ---
 os.environ['OAUTHLIB_INSECURE_TRANSPORT'] = '1'
@@ -99,6 +99,16 @@ if 'basecamp_token' not in st.session_state:
     st.session_state.basecamp_token = None
 if 'user_real_name' not in st.session_state:
     st.session_state.user_real_name = ""
+
+# --- METADATA STATES ---
+if 'detected_date' not in st.session_state:
+    st.session_state.detected_date = None
+if 'detected_time' not in st.session_state:
+    st.session_state.detected_time = None
+if 'detected_title' not in st.session_state:
+    st.session_state.detected_title = "Meeting_Minutes"
+if 'detected_venue' not in st.session_state:
+    st.session_state.detected_venue = ""
 
 # --- FIX: IMMEDIATE GOOGLE RE-LOGIN ---
 if 'gdrive_creds_json' in st.session_state and st.session_state.gdrive_creds_json and not st.session_state.gdrive_creds:
@@ -314,18 +324,24 @@ def _add_rich_text(paragraph, text):
         else:
             paragraph.add_run(part)
 
-# --- AI VISUAL TIMESTAMP EXTRACTION ---
-def get_visual_timestamp_and_duration(file_path):
+# --- AI VISUAL METADATA EXTRACTION ---
+def get_visual_metadata(file_path):
     """
-    1. Uses Gemini Vision to read timestamp from the first frame.
-    2. Uses ffprobe to get the total duration of the meeting.
-    Returns: (start_datetime_sg, duration_seconds)
+    Uses Gemini Vision to read:
+    1. Date & Time
+    2. Meeting Title (Center text)
+    3. Venue (Corner text)
+    Returns a dict with keys: datetime_sg, duration, title, venue
     """
-    if shutil.which("ffmpeg") is None: return None, 0
+    if shutil.which("ffmpeg") is None: return None
     
     thumbnail_path = "temp_thumb.jpg"
-    duration_seconds = 0
-    dt_sg = None
+    result_data = {
+        "datetime_sg": None,
+        "duration": 0,
+        "title": "Meeting_Notes",
+        "venue": ""
+    }
 
     try:
         # A. Get Duration using ffprobe
@@ -333,28 +349,28 @@ def get_visual_timestamp_and_duration(file_path):
         result = subprocess.run(command, capture_output=True, text=True)
         if result.returncode == 0:
             try:
-                duration_seconds = float(result.stdout.strip())
+                result_data["duration"] = float(result.stdout.strip())
             except: pass
 
-        # B. Get Start Time using Vision
-        # Extract 1st second frame
+        # B. Get Visuals using Vision
         subprocess.run([
             'ffmpeg', '-i', file_path, '-ss', '00:00:01', 
             '-vframes', '1', '-q:v', '2', '-y', thumbnail_path
         ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
         if os.path.exists(thumbnail_path):
-            # Send to Gemini
             vision_model = genai.GenerativeModel('gemini-2.5-flash-lite')
-            
             with open(thumbnail_path, "rb") as img_file:
                 img_data = img_file.read()
 
             prompt = """
-            Look at this image. It is a screenshot from a video meeting.
-            Extract the Date and Time visible on the screen (e.g. '2025-09-12 13:34 UTC').
-            Return ONLY the date and time in this ISO format: YYYY-MM-DD HH:MM.
-            If no date/time is visible, return 'None'.
+            Analyze this meeting screenshot. Return a JSON object with these keys:
+            - "datetime": The date and time shown (format YYYY-MM-DD HH:MM).
+            - "title": The large central text indicating the meeting name (e.g. 'Company A x Company B').
+            - "venue": The platform name usually in the top right/left corner (e.g. 'Microsoft Teams', 'Zoom').
+            
+            If any value is not found, return "None" for that value.
+            Return ONLY raw JSON.
             """
             
             response = vision_model.generate_content([
@@ -362,27 +378,37 @@ def get_visual_timestamp_and_duration(file_path):
                 prompt
             ])
             
-            text = response.text.strip()
-            
-            if "None" not in text and len(text) > 5:
-                # Parse simple ISO
-                try:
-                    dt_obj = datetime.datetime.strptime(text, "%Y-%m-%d %H:%M")
-                    # Assume UTC as meetings usually stamp UTC
-                    dt_obj = dt_obj.replace(tzinfo=datetime.timezone.utc)
+            # Parse JSON response
+            try:
+                # Clean code blocks if present
+                text = response.text.strip().replace("```json", "").replace("```", "")
+                data = json.loads(text)
+                
+                # 1. Parse Title
+                if data.get("title") and data["title"] != "None":
+                    result_data["title"] = data["title"].replace(" ", "_").replace("/", "-") # Sanitize for filename
+                
+                # 2. Parse Venue
+                if data.get("venue") and data["venue"] != "None":
+                    result_data["venue"] = data["venue"]
                     
-                    # Convert to SG
-                    sg_tz = pytz.timezone('Asia/Singapore')
-                    dt_sg = dt_obj.astimezone(sg_tz)
-                except:
-                    dt_sg = None
+                # 3. Parse Date/Time
+                dt_str = data.get("datetime")
+                if dt_str and dt_str != "None":
+                     dt_obj = datetime.datetime.strptime(dt_str, "%Y-%m-%d %H:%M")
+                     dt_obj = dt_obj.replace(tzinfo=datetime.timezone.utc)
+                     sg_tz = pytz.timezone('Asia/Singapore')
+                     result_data["datetime_sg"] = dt_obj.astimezone(sg_tz)
+            except Exception as e:
+                print(f"JSON Parse Error: {e}")
+
     except Exception as e:
         print(f"Visual Metadata Error: {e}")
     finally:
         if os.path.exists(thumbnail_path):
             os.remove(thumbnail_path)
             
-    return dt_sg, duration_seconds
+    return result_data
 
 # --- Standard Helpers ---
 
@@ -642,6 +668,7 @@ def get_structured_notes_google(audio_file_path, file_name, participants_context
         except: pass
 
 def add_formatted_text(cell, text):
+    """Original simple parser for main doc."""
     cell.text = ""
     lines = text.split('\n')
     for line in lines:
@@ -689,6 +716,10 @@ if 'detected_date' not in st.session_state:
     st.session_state.detected_date = None
 if 'detected_time' not in st.session_state:
     st.session_state.detected_time = None
+if 'detected_title' not in st.session_state:
+    st.session_state.detected_title = "Meeting_Minutes"
+if 'detected_venue' not in st.session_state:
+    st.session_state.detected_venue = ""
 
 st.title("🤖 AI Meeting Manager")
 
@@ -712,23 +743,29 @@ with tab1:
             st.session_state.chat_history = [] 
             st.session_state.saved_participants_input = participants_input 
             
-            # --- NEW: VISUAL TIMESTAMP & DURATION ---
-            with st.spinner("🕵️‍♀️ Detecting meeting time from screen & duration..."):
-                real_start_time, duration_secs = get_visual_timestamp_and_duration(path)
+            # --- NEW: VISUAL METADATA EXTRACTION (Time + Title + Venue) ---
+            with st.spinner("🕵️‍♀️ Detecting time, title & venue from screen..."):
+                metadata = get_visual_metadata(path)
                 
-            if real_start_time:
+            if metadata and metadata['datetime_sg']:
+                real_start_time = metadata['datetime_sg']
+                duration_secs = metadata['duration']
+                
+                # Save Date
                 st.session_state.detected_date = real_start_time.date()
                 
-                # Calculate End Time
+                # Calc Time Range
                 end_time = real_start_time + datetime.timedelta(seconds=duration_secs)
-                
-                # Format: 2:00 PM - 3:30 PM
                 time_str = f"{real_start_time.strftime('%I:%M %p')} - {end_time.strftime('%I:%M %p')}"
                 st.session_state.detected_time = time_str
                 
-                st.toast(f"📅 Found Meeting: {st.session_state.detected_date} ({time_str})")
+                # Save Title & Venue
+                if metadata['title']: st.session_state.detected_title = metadata['title']
+                if metadata['venue']: st.session_state.detected_venue = metadata['venue']
+                
+                st.toast(f"📅 Found: {st.session_state.detected_date} | {metadata.get('title')} | {metadata.get('venue')}")
             else:
-                st.toast("⚠️ No visual timestamp found. Using today's date.")
+                st.toast("⚠️ No visual metadata found. Using defaults.")
 
             c_list = [l.replace("(Client)","").strip() for l in participants_input.split('\n') if "(Client)" in l]
             i_list = [l.replace("(iFoundries)","").strip() for l in participants_input.split('\n') if "(iFoundries)" in l]
@@ -761,14 +798,19 @@ with tab2:
     sg_tz = pytz.timezone('Asia/Singapore')
     sg_now = datetime.datetime.now(sg_tz)
     
-    # Use detected date/time if available, otherwise current time
+    # Use detected values or defaults
     default_date = st.session_state.detected_date if st.session_state.detected_date else sg_now.date()
     default_time = st.session_state.detected_time if st.session_state.detected_time else sg_now.strftime("%I:%M %p")
+    default_venue = st.session_state.detected_venue if st.session_state.detected_venue else ""
+    
+    # Filename Title construction
+    base_title = st.session_state.detected_title if st.session_state.detected_title else "Meeting_Minutes"
+    final_fname = f"{base_title}_{default_date}.docx"
 
     row1, row2 = st.columns(2)
     with row1:
         date_obj = st.date_input("Date", default_date)
-        venue = st.text_input("Venue")
+        venue = st.text_input("Venue", value=default_venue) # Auto-filled Venue
         client_rep = st.text_area("Client Reps", value=st.session_state.auto_client_reps)
         absent = st.text_input("Absent")
     with row2:
@@ -822,7 +864,7 @@ with tab2:
                                 selected_list = st.selectbox("Select Todo List", options=[tl[0] for tl in todolists])
                                 if selected_list:
                                     bc_sub_id = next(tl[1] for tl in todolists if tl[0] == selected_list)
-                                    bc_title = st.text_input("To-Do Title", value=f"Meeting Minutes - {date_str}")
+                                    bc_title = st.text_input("To-Do Title", value=f"{base_title.replace('_',' ')} - {date_str}")
                                     bc_content = st.text_area("Description", value="Attached are the minutes from the meeting.")
                             else: st.warning("No To-do lists found.")
                     
@@ -830,14 +872,14 @@ with tab2:
                         mb = next((t for t in project_tools if t['name'] == 'message_board'), None)
                         if mb:
                             bc_tool_id = mb['id']
-                            bc_title = st.text_input("Subject", value=f"Meeting Minutes - {date_str}")
+                            bc_title = st.text_input("Subject", value=f"{base_title.replace('_',' ')} - {date_str}")
                             bc_content = st.text_area("Message Body", value="Hi team,\n\nHere are the minutes from today's meeting.")
                     
                     elif bc_tool_type == "Docs & Files":
                         vault = next((t for t in project_tools if t['name'] == 'vault'), None)
                         if vault:
                             bc_tool_id = vault['id']
-                            bc_title = st.text_input("File Name", value=f"Minutes_{date_str}")
+                            bc_title = st.text_input("File Name", value=final_fname)
                             bc_content = st.text_area("Description (Optional)", value="")
                             
         except Exception as e: st.error(f"Basecamp Error: {e}")
@@ -875,18 +917,17 @@ with tab2:
                 bio = io.BytesIO()
                 doc.save(bio)
                 bio.seek(0)
-                fname = f"Minutes_{date_str}.docx"
                 
                 if do_drive and st.session_state.gdrive_creds:
                     with st.spinner("Uploading to Drive ('Meeting Notes' folder)..."):
-                        if upload_to_drive_user(bio, fname, "Meeting Notes"): st.success("✅ Uploaded to Drive!")
+                        if upload_to_drive_user(bio, final_fname, "Meeting Notes"): st.success("✅ Uploaded to Drive!")
                         else: st.error("Drive upload failed.")
                     bio.seek(0)
 
                 if do_basecamp and basecamp_ready and bc_session_user:
                     with st.spinner(f"Posting to Basecamp ({bc_tool_type})..."):
                         file_bytes = bio.getvalue()
-                        sgid = upload_bc_attachment(bc_session_user, file_bytes, fname)
+                        sgid = upload_bc_attachment(bc_session_user, file_bytes, final_fname)
                         if sgid:
                             if post_to_basecamp(bc_session_user, bc_project_id, bc_tool_type, bc_tool_id, bc_sub_id, bc_title, bc_content, sgid):
                                 st.success(f"✅ Posted to Basecamp!")
@@ -894,7 +935,7 @@ with tab2:
                         else: st.error("Basecamp upload failed.")
                     bio.seek(0)
 
-                st.download_button("Download .docx", bio, fname)
+                st.download_button("Download .docx", bio, final_fname)
                 
             except Exception as e:
                 st.error(f"Error: {e}")
