@@ -98,11 +98,6 @@ if 'basecamp_token' not in st.session_state:
     st.session_state.basecamp_token = None
 if 'user_real_name' not in st.session_state:
     st.session_state.user_real_name = ""
-# --- NEW: METADATA STATE ---
-if 'detected_date' not in st.session_state:
-    st.session_state.detected_date = None
-if 'detected_time' not in st.session_state:
-    st.session_state.detected_time = None
 
 # --- FIX: IMMEDIATE GOOGLE RE-LOGIN ---
 if 'gdrive_creds_json' in st.session_state and st.session_state.gdrive_creds_json and not st.session_state.gdrive_creds:
@@ -164,7 +159,7 @@ with st.sidebar:
         bc_auth_url, _ = bc_oauth.authorization_url(BASECAMP_AUTH_URL, type="web_server")
         
         if AUTO_LOGIN_MODE:
-            # Use native button for reliability
+            # Native Streamlit Link Button
             st.link_button("Login to Basecamp", bc_auth_url, type="primary")
             st.caption("Opens in a new tab. Close it after logging in.")
         else:
@@ -257,11 +252,13 @@ def add_markdown_to_doc(doc, text):
     lines = text.split('\n')
     table_row_pattern = re.compile(r"^\|(.+)\|")
     table_sep_pattern = re.compile(r"^\|[-:| ]+\|")
+    
     table_data = []
     in_table = False
 
     for line in lines:
         stripped = line.strip()
+        
         if table_row_pattern.match(stripped):
             if not table_sep_pattern.match(stripped):
                 cells = [c.strip() for c in stripped.strip('|').split('|')]
@@ -654,6 +651,11 @@ if "auto_ifoundries_reps" not in st.session_state:
     st.session_state.auto_ifoundries_reps = ""
 if "saved_participants_input" not in st.session_state:
     st.session_state.saved_participants_input = ""
+# --- NEW: METADATA STATE ---
+if 'detected_date' not in st.session_state:
+    st.session_state.detected_date = None
+if 'detected_time' not in st.session_state:
+    st.session_state.detected_time = None
 
 st.title("🤖 AI Meeting Manager")
 
@@ -720,6 +722,10 @@ with tab2:
     # Use detected date/time if available, otherwise current time
     default_date = st.session_state.get("detected_date", sg_now.date())
     default_time = st.session_state.get("detected_time", sg_now.strftime("%I:%M %p"))
+    
+    # Ensure we have a valid date object before calling date_input
+    if default_date is None:
+        default_date = sg_now.date()
 
     row1, row2 = st.columns(2)
     with row1:
@@ -733,7 +739,7 @@ with tab2:
         prepared_by = st.text_input("Prepared by", value=default_prepared_by)
         ifoundries_rep = st.text_input("iFoundries Reps", value=st.session_state.auto_ifoundries_reps)
     
-    date_str = date_obj.strftime("%d %B %Y")
+    date_str = date_obj.strftime("%d %B %Y") if date_obj else ""
     time_str = time_obj
     
     discussion_text = st.text_area("Discussion", value=st.session_state.ai_results.get("discussion", ""), height=300)
