@@ -1,6 +1,7 @@
 import streamlit as st
 import streamlit.components.v1 as components
 import os
+import shutil
 
 # --- FIX: ALLOW OAUTH TO RUN ON STREAMLIT CLOUD ---
 os.environ['OAUTHLIB_INSECURE_TRANSPORT'] = '1'
@@ -321,6 +322,10 @@ def _add_rich_text(paragraph, text):
 # --- METADATA EXTRACTION HELPER ---
 def get_video_metadata(file_path):
     """Extracts creation_time using ffprobe."""
+    # Check if ffprobe is installed/available
+    if shutil.which("ffprobe") is None:
+        return None
+
     try:
         command = [
             "ffprobe", "-v", "quiet", "-print_format", "json", 
@@ -330,19 +335,23 @@ def get_video_metadata(file_path):
         if result.returncode != 0: return None 
         
         data = json.loads(result.stdout)
-        tags = data.get('format', {}).get('tags', {})
-        creation_time_str = tags.get('creation_time')
+        
+        # Try finding creation_time in different places
+        creation_time_str = data.get('format', {}).get('tags', {}).get('creation_time')
         
         if not creation_time_str:
             for stream in data.get('streams', []):
-                stream_tags = stream.get('tags', {})
-                if 'creation_time' in stream_tags:
-                    creation_time_str = stream_tags['creation_time']
-                    break
+                creation_time_str = stream.get('tags', {}).get('creation_time')
+                if creation_time_str: break
         
         if creation_time_str:
-            dt_utc = datetime.datetime.strptime(creation_time_str.split('.')[0], "%Y-%m-%dT%H:%M:%S")
+            # Parse UTC (ISO 8601) - Handles milliseconds if present
+            # Clean string (remove Z if present)
+            clean_time = creation_time_str.split('.')[0].rstrip('Z')
+            dt_utc = datetime.datetime.strptime(clean_time, "%Y-%m-%dT%H:%M:%S")
             dt_utc = dt_utc.replace(tzinfo=datetime.timezone.utc)
+            
+            # Convert to SG Time
             sg_tz = pytz.timezone('Asia/Singapore')
             dt_sg = dt_utc.astimezone(sg_tz)
             return dt_sg
@@ -734,7 +743,7 @@ with tab2:
         prepared_by = st.text_input("Prepared by", value=default_prepared_by)
         ifoundries_rep = st.text_input("iFoundries Reps", value=st.session_state.auto_ifoundries_reps)
     
-    date_str = date_obj.strftime("%d %B %Y")
+    date_str = date_obj.strftime("%d %B %Y") if date_obj else ""
     time_str = time_obj
     
     discussion_text = st.text_area("Discussion", value=st.session_state.ai_results.get("discussion", ""), height=300)
