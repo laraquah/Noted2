@@ -2,10 +2,6 @@ import streamlit as st
 import streamlit.components.v1 as components
 import os
 import shutil
-
-# --- FIX: ALLOW OAUTH TO RUN ON STREAMLIT CLOUD ---
-os.environ['OAUTHLIB_INSECURE_TRANSPORT'] = '1'
-
 import tempfile
 from docx import Document
 from docx.shared import Pt, Inches, RGBColor
@@ -17,6 +13,11 @@ import json
 import datetime
 import pytz
 import re
+import requests
+from requests_oauthlib import OAuth2Session
+
+# --- FIX: ALLOW OAUTH TO RUN ON STREAMLIT CLOUD ---
+os.environ['OAUTHLIB_INSECURE_TRANSPORT'] = '1'
 
 # Import Google Cloud Libraries
 from google.cloud import speech
@@ -29,10 +30,6 @@ from google_auth_oauthlib.flow import Flow
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseUpload, MediaIoBaseDownload
 from google.oauth2 import service_account
-
-# --- Import Basecamp & formatting tools ---
-import requests
-from requests_oauthlib import OAuth2Session
 
 # -----------------------------------------------------
 # 1. CONSTANTS & CONFIGURATION
@@ -69,173 +66,7 @@ BASECAMP_TOKEN_URL = "https://launchpad.37signals.com/authorization/token"
 BASECAMP_API_BASE = f"https://3.basecampapi.com/{BASECAMP_ACCOUNT_ID}"
 BASECAMP_USER_AGENT = {"User-Agent": "AI Meeting Notes App (external-user)"}
 
-# -----------------------------------------------------
-# 2. HELPER: GET USER IDENTITY
-# -----------------------------------------------------
-def fetch_basecamp_name(token_dict):
-    try:
-        identity_url = "https://launchpad.37signals.com/authorization.json"
-        headers = {
-            "Authorization": f"Bearer {token_dict['access_token']}",
-            "User-Agent": "AI Meeting Notes App"
-        }
-        response = requests.get(identity_url, headers=headers)
-        if response.status_code == 200:
-            data = response.json()
-            first = data.get('identity', {}).get('first_name', '')
-            last = data.get('identity', {}).get('last_name', '')
-            return f"{first} {last}".strip()
-    except Exception:
-        return ""
-    return ""
-
-# -----------------------------------------------------
-# 3. STATE & AUTO-LOGIN HANDLER
-# -----------------------------------------------------
-if 'gdrive_creds' not in st.session_state:
-    st.session_state.gdrive_creds = None
-if 'basecamp_token' not in st.session_state:
-    st.session_state.basecamp_token = None
-if 'user_real_name' not in st.session_state:
-    st.session_state.user_real_name = ""
-if 'detected_date' not in st.session_state:
-    st.session_state.detected_date = None
-if 'detected_time' not in st.session_state:
-    st.session_state.detected_time = None
-if 'detected_title' not in st.session_state:
-    st.session_state.detected_title = "Meeting_Minutes"
-if 'detected_venue' not in st.session_state:
-    st.session_state.detected_venue = ""
-
-# --- FIX: IMMEDIATE GOOGLE RE-LOGIN ---
-if 'gdrive_creds_json' in st.session_state and st.session_state.gdrive_creds_json and not st.session_state.gdrive_creds:
-    try:
-        creds = Credentials.from_authorized_user_info(
-            json.loads(st.session_state.gdrive_creds_json)
-        )
-        st.session_state.gdrive_creds = creds
-    except Exception as e:
-        st.session_state.gdrive_creds_json = None
-
-# --- AUTO-LOGIN HANDLER (BASECAMP) ---
-if AUTO_LOGIN_MODE and "code" in st.query_params and not st.session_state.basecamp_token:
-    auth_code = st.query_params["code"]
-    try:
-        payload = {
-            "type": "web_server",
-            "client_id": BASECAMP_CLIENT_ID,
-            "client_secret": BASECAMP_CLIENT_SECRET,
-            "redirect_uri": BASECAMP_REDIRECT_URI,
-            "code": auth_code
-        }
-        response = requests.post(BASECAMP_TOKEN_URL, data=payload)
-        response.raise_for_status()
-        token = response.json()
-        
-        st.session_state.basecamp_token = token
-        
-        real_name = fetch_basecamp_name(token)
-        if real_name:
-            st.session_state.user_real_name = real_name
-            
-        st.query_params.clear()
-        st.toast("✅ Basecamp Login Successful!", icon="🎉")
-        time.sleep(1)
-        st.rerun()
-    except Exception as e:
-        st.error(f"Auto-login failed: {e}")
-
-# -----------------------------------------------------
-# 4. SIDEBAR UI
-# -----------------------------------------------------
-with st.sidebar:
-    st.title("🔐 Login")
-    
-    # --- STEP 1: BASECAMP ---
-    st.markdown("### Step 1: Basecamp")
-    
-    if st.session_state.basecamp_token:
-        st.success(f"✅ Connected as {st.session_state.user_real_name}")
-        if st.button("Logout Basecamp"):
-            st.session_state.basecamp_token = None
-            st.session_state.user_real_name = ""
-            st.rerun()
-    else:
-        bc_oauth = OAuth2Session(BASECAMP_CLIENT_ID, redirect_uri=BASECAMP_REDIRECT_URI)
-        bc_auth_url, _ = bc_oauth.authorization_url(BASECAMP_AUTH_URL, type="web_server")
-        
-        if AUTO_LOGIN_MODE:
-            st.link_button("Login to Basecamp", bc_auth_url, type="primary")
-            st.caption("Opens in a new tab. Close it after logging in.")
-        else:
-            st.markdown(f"👉 [**Authorize Basecamp**]({bc_auth_url})")
-            bc_code = st.text_input("Paste Basecamp Code:", key="bc_code")
-            if bc_code:
-                try:
-                    payload = {
-                        "type": "web_server",
-                        "client_id": BASECAMP_CLIENT_ID,
-                        "client_secret": BASECAMP_CLIENT_SECRET,
-                        "redirect_uri": BASECAMP_REDIRECT_URI,
-                        "code": bc_code
-                    }
-                    response = requests.post(BASECAMP_TOKEN_URL, data=payload)
-                    response.raise_for_status()
-                    token = response.json()
-                    st.session_state.basecamp_token = token
-                    real_name = fetch_basecamp_name(token)
-                    if real_name: st.session_state.user_real_name = real_name
-                    st.rerun()
-                except Exception as e:
-                    st.error(f"Login failed: {e}")
-
-    st.divider()
-
-    # --- STEP 2: GOOGLE DRIVE ---
-    st.markdown("### Step 2: Google Drive")
-    
-    if not st.session_state.basecamp_token:
-        st.info("🔒 Please complete Step 1 first.")
-    else:
-        if st.session_state.gdrive_creds:
-            st.success("✅ Connected")
-            if st.button("Logout Drive"):
-                st.session_state.gdrive_creds = None
-                st.session_state.gdrive_creds_json = None
-                st.rerun()
-        else:
-            try:
-                flow = Flow.from_client_config(
-                    GDRIVE_CLIENT_CONFIG,
-                    scopes=["https://www.googleapis.com/auth/drive"],
-                    redirect_uri="urn:ietf:wg:oauth:2.0:oob"
-                )
-                auth_url, _ = flow.authorization_url(prompt='consent')
-                
-                st.link_button("Login to Google Drive", auth_url)
-                g_code = st.text_input("Paste Google Code:", key="g_code")
-                
-                if g_code:
-                    flow.fetch_token(code=g_code)
-                    st.session_state.gdrive_creds = flow.credentials
-                    st.session_state.gdrive_creds_json = flow.credentials.to_json()
-                    st.rerun()
-            except Exception as e:
-                st.error(f"Config Error: {e}")
-
-# -----------------------------------------------------
-# 5. SECURITY LOCK
-# -----------------------------------------------------
-if not (st.session_state.basecamp_token and st.session_state.gdrive_creds):
-    st.title("🔒 Access Restricted")
-    st.warning("Please log in to **Basecamp** and **Google Drive** in the sidebar.")
-    st.stop() 
-
-# =====================================================
-#     MAIN APP LOGIC
-# =====================================================
-
-# --- API CLIENTS ---
+# --- API CLIENTS SETUP ---
 try:
     sa_creds = service_account.Credentials.from_service_account_info(GCP_SERVICE_ACCOUNT_JSON)
     storage_client = storage.Client(credentials=sa_creds)
@@ -247,110 +78,158 @@ except Exception as e:
     st.error(f"System Error (AI Services): {e}")
     st.stop()
 
-# -----------------------------------------------------
-# 6. HELPER FUNCTIONS (UPDATED FOR FORMATTING)
-# -----------------------------------------------------
+# =====================================================
+# 2. HELPER FUNCTIONS
+# =====================================================
 
-def _add_rich_text(paragraph, text):
-    """Parses markdown-style **bold** text and applies Word formatting."""
-    # Regex to split by **text**
-    parts = re.split(r'(\*\*.*?\*\*)', text)
-    for part in parts:
-        if part.startswith('**') and part.endswith('**'):
-            # Remove asterisks and make bold
-            clean_text = part[2:-2]
-            run = paragraph.add_run(clean_text)
-            run.bold = True
+def fetch_basecamp_name(token_dict):
+    try:
+        identity_url = "https://launchpad.37signals.com/authorization.json"
+        headers = {"Authorization": f"Bearer {token_dict['access_token']}", "User-Agent": "AI Meeting Notes App"}
+        response = requests.get(identity_url, headers=headers)
+        if response.status_code == 200:
+            data = response.json()
+            return f"{data.get('identity', {}).get('first_name', '')} {data.get('identity', {}).get('last_name', '')}".strip()
+    except: return ""
+    return ""
+
+def get_basecamp_session_user():
+    if not st.session_state.basecamp_token: return None
+    session = OAuth2Session(BASECAMP_CLIENT_ID, token=st.session_state.basecamp_token)
+    session.headers.update(BASECAMP_USER_AGENT)
+    return session
+
+def upload_to_gcs(file_path, destination_blob_name):
+    try:
+        bucket = storage_client.bucket(GCS_BUCKET_NAME)
+        blob = bucket.blob(destination_blob_name)
+        blob.upload_from_filename(file_path, timeout=3600)
+        return f"gs://{GCS_BUCKET_NAME}/{destination_blob_name}"
+    except Exception as e:
+        st.error(f"GCS Upload Error: {e}")
+        return None
+
+def get_or_create_folder(service, folder_name):
+    try:
+        query = f"mimeType='application/vnd.google-apps.folder' and name='{folder_name}' and trashed=false"
+        results = service.files().list(q=query, fields="files(id)").execute()
+        items = results.get('files', [])
+        if items: return items[0]['id']
         else:
-            # Regular text
-            paragraph.add_run(part)
+            file_metadata = {'name': folder_name, 'mimeType': 'application/vnd.google-apps.folder'}
+            folder = service.files().create(body=file_metadata, fields='id').execute()
+            return folder.get('id')
+    except Exception as e: return None
 
-def add_formatted_text(cell, text):
-    """Enhanced parser to handle bullets and bold text correctly in Word table cells."""
-    cell.text = ""
-    lines = text.split('\n')
-    for line in lines:
-        line = line.strip()
-        if not line: continue
+def upload_to_drive_user(file_stream, file_name, target_folder_name):
+    if not st.session_state.gdrive_creds: return None
+    try:
+        service = build("drive", "v3", credentials=st.session_state.gdrive_creds)
+        folder_id = get_or_create_folder(service, target_folder_name)
+        parents = [folder_id] if folder_id else []
+
+        file_metadata = {"name": file_name, "parents": parents}
+        media = MediaIoBaseUpload(file_stream, mimetype="application/vnd.openxmlformats-officedocument.wordprocessingml.document")
+        file = service.files().create(body=file_metadata, media_body=media, fields="id").execute()
+        return file.get("id")
+    except Exception as e:
+        st.error(f"Google Drive Upload Error: {e}")
+        return None
+
+def save_analysis_data_to_drive(data_dict, filename):
+    if not st.session_state.gdrive_creds: return None
+    try:
+        service = build("drive", "v3", credentials=st.session_state.gdrive_creds)
+        folder_id = get_or_create_folder(service, "Meeting_Data")
+        if not folder_id: return None
+
+        json_str = json.dumps(data_dict, indent=2)
+        fh = io.BytesIO(json_str.encode('utf-8'))
+        file_metadata = {"name": filename, "parents": [folder_id]}
+        media = MediaIoBaseUpload(fh, mimetype='application/json')
+        service.files().create(body=file_metadata, media_body=media, fields="id").execute()
+        return True
+    except: return False
+
+def list_past_meetings():
+    if not st.session_state.gdrive_creds: return []
+    try:
+        service = build("drive", "v3", credentials=st.session_state.gdrive_creds)
+        folder_id = get_or_create_folder(service, "Meeting_Data")
+        if not folder_id: return []
+        query = f"'{folder_id}' in parents and mimeType='application/json' and trashed=false"
+        results = service.files().list(q=query, fields="files(id, name, createdTime)", orderBy="createdTime desc").execute()
+        return results.get('files', [])
+    except: return []
+
+def load_meeting_data(file_id):
+    if not st.session_state.gdrive_creds: return None
+    try:
+        service = build("drive", "v3", credentials=st.session_state.gdrive_creds)
+        request = service.files().get_media(fileId=file_id)
+        fh = io.BytesIO()
+        downloader = MediaIoBaseDownload(fh, request)
+        done = False
+        while done is False:
+            status, done = downloader.next_chunk()
+        fh.seek(0)
+        return json.load(fh)
+    except: return None
+
+# --- Basecamp Helpers ---
+def get_basecamp_projects(_session):
+    try:
+        response = _session.get(f"{BASECAMP_API_BASE}/projects.json")
+        response.raise_for_status()
+        return sorted([(p['name'], p['id']) for p in response.json() if p['status'] == 'active'], key=lambda x: x[0])
+    except: return []
+
+def get_project_tools(_session, project_id):
+    try:
+        response = _session.get(f"{BASECAMP_API_BASE}/projects/{project_id}.json")
+        response.raise_for_status()
+        return response.json().get('dock', [])
+    except: return []
+
+def get_todolists(_session, todoset_id, project_id):
+    try:
+        url = f"{BASECAMP_API_BASE}/buckets/{project_id}/todosets/{todoset_id}/todolists.json"
+        resp = _session.get(url)
+        return sorted([(t['title'], t['id']) for t in resp.json()], key=lambda x: x[0])
+    except: return []
+
+def upload_bc_attachment(_session, file_bytes, file_name):
+    try:
+        headers = _session.headers.copy()
+        headers.update({'Content-Type': 'application/octet-stream', 'Content-Length': str(len(file_bytes))})
+        resp = _session.post(f"{BASECAMP_API_BASE}/attachments.json?name={file_name}", data=file_bytes, headers=headers)
+        return resp.json()['attachable_sgid']
+    except Exception as e:
+        st.error(f"Basecamp Upload Error: {e}")
+        return None
+
+def post_to_basecamp(_session, project_id, tool_type, tool_id, sub_id, title, content, attachment_sgid):
+    try:
+        attach_html = f'<bc-attachment sgid="{attachment_sgid}"></bc-attachment>' if attachment_sgid else ""
         
-        p = cell.add_paragraph()
-        p.paragraph_format.space_before = Pt(0)
-        p.paragraph_format.space_after = Pt(2) # Slight spacing for readability
-        
-        if line.startswith('##'):
-            # Heading style within cell
-            clean_title = line.lstrip('#').strip()
-            run = p.add_run(clean_title)
-            run.underline = True
-            run.bold = True
-            p.paragraph_format.space_before = Pt(8)
-        elif line.startswith('*') or line.startswith('-'):
-            # Bullet point with rich text support
-            clean_text = line.lstrip('*- ').strip()
-            p.style = 'List Bullet' # Use Word's native bullet style if available
-            # If style fails, manual bullet:
-            if not p.style: p.text = "• "
-            _add_rich_text(p, clean_text)
-        else:
-            # Normal paragraph with rich text support
-            _add_rich_text(p, line)
+        if tool_type == "To-dos":
+            url = f"{BASECAMP_API_BASE}/buckets/{project_id}/todolists/{sub_id}/todos.json"
+            payload = {"content": title, "description": content + attach_html}
+        elif tool_type == "Message Board":
+            url = f"{BASECAMP_API_BASE}/buckets/{project_id}/message_boards/{tool_id}/messages.json"
+            payload = {"subject": title, "content": content + attach_html, "status": "active"}
+        elif tool_type == "Docs & Files":
+            url = f"{BASECAMP_API_BASE}/buckets/{project_id}/vaults/{tool_id}/uploads.json"
+            payload = {"attachable_sgid": attachment_sgid, "base_name": title, "content": content}
 
-# --- Markown to Doc (For Chat) ---
-def add_markdown_to_doc(doc, text):
-    lines = text.split('\n')
-    table_row_pattern = re.compile(r"^\|(.+)\|")
-    table_sep_pattern = re.compile(r"^\|[-:| ]+\|")
-    table_data = []
-    in_table = False
+        resp = _session.post(url, json=payload)
+        resp.raise_for_status()
+        return True
+    except Exception as e:
+        st.error(f"Basecamp Post Error: {e}")
+        return False
 
-    for line in lines:
-        stripped = line.strip()
-        if table_row_pattern.match(stripped):
-            if not table_sep_pattern.match(stripped):
-                cells = [c.strip() for c in stripped.strip('|').split('|')]
-                table_data.append(cells)
-            in_table = True
-            continue
-        elif in_table and not table_row_pattern.match(stripped) and stripped == "":
-            if table_data:
-                _render_word_table(doc, table_data)
-                table_data = []
-            in_table = False
-            continue
-        elif in_table:
-             if table_data:
-                _render_word_table(doc, table_data)
-                table_data = []
-             in_table = False
-
-        if stripped.startswith('##'):
-            p = doc.add_heading(stripped.lstrip('#').strip(), level=2)
-        elif stripped.startswith('*') or stripped.startswith('-'):
-            clean_text = stripped.lstrip('*- ').strip()
-            p = doc.add_paragraph(style='List Bullet')
-            _add_rich_text(p, clean_text)
-        elif stripped:
-            p = doc.add_paragraph()
-            _add_rich_text(p, stripped)
-
-    if table_data: _render_word_table(doc, table_data)
-
-def _render_word_table(doc, rows):
-    if not rows: return
-    num_cols = max(len(r) for r in rows)
-    table = doc.add_table(rows=len(rows), cols=num_cols)
-    table.style = 'Table Grid'
-    for i, row_data in enumerate(rows):
-        row_cells = table.rows[i].cells
-        for j, text in enumerate(row_data):
-            if j < len(row_cells):
-                p = row_cells[j].paragraphs[0]
-                _add_rich_text(p, text)
-                if i == 0: 
-                    for run in p.runs: run.bold = True
-    doc.add_paragraph("")
-
-# --- METADATA EXTRACTION ---
+# --- AI Analysis ---
 def get_visual_metadata(file_path):
     if shutil.which("ffmpeg") is None: return None
     thumbnail_path = "temp_thumb.jpg"
@@ -363,14 +242,10 @@ def get_visual_metadata(file_path):
         subprocess.run(['ffmpeg', '-i', file_path, '-ss', '00:00:01', '-vframes', '1', '-q:v', '2', '-y', thumbnail_path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
         if os.path.exists(thumbnail_path):
-            vision = genai.GenerativeModel('gemini-2.5-flash-lite')
+            vision_model = genai.GenerativeModel('gemini-2.5-flash-lite')
             with open(thumbnail_path, "rb") as img: img_data = img.read()
-            
-            prompt = """Analyze this meeting screenshot. Return JSON:
-            { "datetime": "YYYY-MM-DD HH:MM", "title": "Center Text", "venue": "Corner Text" }
-            If not found, use "None"."""
-            
-            resp = vision.generate_content([{'mime_type': 'image/jpeg', 'data': img_data}, prompt])
+            prompt = """Analyze this meeting screenshot. Return JSON: { "datetime": "YYYY-MM-DD HH:MM", "title": "Center Text", "venue": "Corner Text" }. If not found, use "None"."""
+            resp = vision_model.generate_content([{'mime_type': 'image/jpeg', 'data': img_data}, prompt])
             try:
                 data = json.loads(resp.text.strip().replace("```json", "").replace("```", ""))
                 if data.get("title") != "None": result_data["title"] = data["title"].replace(" ", "_")
@@ -384,257 +259,292 @@ def get_visual_metadata(file_path):
         if os.path.exists(thumbnail_path): os.remove(thumbnail_path)
     return result_data
 
-# --- Drive & Cloud Helpers ---
-def upload_to_gcs(file_path, blob_name):
+def get_structured_notes_google(audio_file_path, file_name, participants_context):
     try:
-        bucket = storage_client.bucket(GCS_BUCKET_NAME)
-        blob = bucket.blob(blob_name)
-        blob.upload_from_filename(file_path, timeout=3600)
-        return f"gs://{GCS_BUCKET_NAME}/{blob_name}"
-    except: return None
+        with st.spinner(f"Converting {file_name}..."):
+            base_name = os.path.splitext(audio_file_path)[0]
+            flac_file_path = f"{base_name}.flac"
+            subprocess.run(["ffmpeg", "-i", audio_file_path, "-vn", "-acodec", "flac", "-y", flac_file_path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
-def get_or_create_folder(service, name):
-    try:
-        q = f"mimeType='application/vnd.google-apps.folder' and name='{name}' and trashed=false"
-        res = service.files().list(q=q, fields="files(id)").execute()
-        items = res.get('files', [])
-        if items: return items[0]['id']
-        else:
-            meta = {'name': name, 'mimeType': 'application/vnd.google-apps.folder'}
-            return service.files().create(body=meta, fields='id').execute().get('id')
-    except: return None
+        with st.spinner(f"Uploading to Google Cloud..."):
+            gcs_uri = upload_to_gcs(flac_file_path, f"{os.path.splitext(file_name)[0]}.flac")
+            if not gcs_uri: return {"error": "Upload failed."}
 
-def upload_to_drive_user(file, name, folder):
-    if not st.session_state.gdrive_creds: return None
-    try:
-        service = build("drive", "v3", credentials=st.session_state.gdrive_creds)
-        fid = get_or_create_folder(service, folder)
-        meta = {"name": name, "parents": [fid] if fid else []}
-        media = MediaIoBaseUpload(file, mimetype="application/vnd.openxmlformats-officedocument.wordprocessingml.document")
-        return service.files().create(body=meta, media_body=media, fields="id").execute().get("id")
-    except: return None
-
-def save_analysis_data_to_drive(data, filename):
-    if not st.session_state.gdrive_creds: return None
-    try:
-        service = build("drive", "v3", credentials=st.session_state.gdrive_creds)
-        fid = get_or_create_folder(service, "Meeting_Data")
-        fh = io.BytesIO(json.dumps(data, indent=2).encode('utf-8'))
-        meta = {"name": filename, "parents": [fid] if fid else []}
-        media = MediaIoBaseUpload(fh, mimetype='application/json')
-        return service.files().create(body=meta, media_body=media, fields="id").execute().get("id")
-    except: return None
-
-def list_past_meetings():
-    if not st.session_state.gdrive_creds: return []
-    try:
-        service = build("drive", "v3", credentials=st.session_state.gdrive_creds)
-        fid = get_or_create_folder(service, "Meeting_Data")
-        if not fid: return []
-        q = f"'{fid}' in parents and mimeType='application/json' and trashed=false"
-        return service.files().list(q=q, fields="files(id, name, createdTime)", orderBy="createdTime desc").execute().get('files', [])
-    except: return []
-
-def load_meeting_data(file_id):
-    if not st.session_state.gdrive_creds: return None
-    try:
-        service = build("drive", "v3", credentials=st.session_state.gdrive_creds)
-        fh = io.BytesIO()
-        downloader = MediaIoBaseDownload(fh, service.files().get_media(fileId=file_id))
-        done = False
-        while not done: _, done = downloader.next_chunk()
-        fh.seek(0)
-        return json.load(fh)
-    except: return None
-
-# --- Basecamp Helpers ---
-def get_bc_session():
-    if not st.session_state.basecamp_token: return None
-    s = OAuth2Session(BASECAMP_CLIENT_ID, token=st.session_state.basecamp_token)
-    s.headers.update(BASECAMP_USER_AGENT)
-    return s
-
-def get_bc_projects(sess):
-    try: return sorted([(p['name'], p['id']) for p in sess.get(f"{BASECAMP_API_BASE}/projects.json").json() if p['status']=='active'], key=lambda x:x[0])
-    except: return []
-
-def get_bc_dock(sess, pid):
-    try: return sess.get(f"{BASECAMP_API_BASE}/projects/{pid}.json").json().get('dock', [])
-    except: return []
-
-def get_bc_lists(sess, tid, pid):
-    try: return sorted([(t['title'], t['id']) for t in sess.get(f"{BASECAMP_API_BASE}/buckets/{pid}/todosets/{tid}/todolists.json").json()], key=lambda x:x[0])
-    except: return []
-
-def upload_bc_file(sess, data, name):
-    try:
-        h = sess.headers.copy(); h.update({'Content-Type': 'application/octet-stream', 'Content-Length': str(len(data))})
-        return sess.post(f"{BASECAMP_API_BASE}/attachments.json?name={name}", data=data, headers=h).json()['attachable_sgid']
-    except: return None
-
-def post_to_bc(sess, pid, tool, tid, subid, title, body, sgid):
-    try:
-        att = f'<bc-attachment sgid="{sgid}"></bc-attachment>' if sgid else ""
-        if tool == "To-dos":
-            url, pl = f"{BASECAMP_API_BASE}/buckets/{pid}/todolists/{subid}/todos.json", {"content": title, "description": body + att}
-        elif tool == "Message Board":
-            url, pl = f"{BASECAMP_API_BASE}/buckets/{pid}/message_boards/{tid}/messages.json", {"subject": title, "content": body + att, "status": "active"}
-        elif tool == "Docs & Files":
-            url, pl = f"{BASECAMP_API_BASE}/buckets/{pid}/vaults/{tid}/uploads.json", {"attachable_sgid": sgid, "base_name": title, "content": body}
-        sess.post(url, json=pl).raise_for_status()
-        return True
-    except: return False
-
-def analyze_audio_gemini(path, participants):
-    try:
-        with st.spinner("Converting..."):
-            subprocess.run(['ffmpeg', '-i', path, '-vn', '-acodec', 'flac', '-y', f"{path}.flac"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        progress_bar = st.progress(0, text="Transcribing...")
+        audio = speech.RecognitionAudio(uri=gcs_uri)
+        config = speech.RecognitionConfig(encoding=speech.RecognitionConfig.AudioEncoding.FLAC, language_code="en-US", enable_automatic_punctuation=True, use_enhanced=True, model="video", diarization_config=speech.SpeakerDiarizationConfig(enable_speaker_diarization=True, min_speaker_count=2, max_speaker_count=6))
+        operation = speech_client.long_running_recognize(config=config, audio=audio)
         
-        with st.spinner("Uploading..."):
-            uri = upload_to_gcs(f"{path}.flac", f"{os.path.basename(path)}.flac")
-            if not uri: return {"error": "Upload failed"}
+        while not operation.done():
+            if operation.metadata: progress_bar.progress(operation.metadata.progress_percent, text=f"Transcribing: {operation.metadata.progress_percent}%")
+            time.sleep(2)
 
-        with st.spinner("Transcribing..."):
-            client = speech.SpeechClient(credentials=service_account.Credentials.from_service_account_info(GCP_SERVICE_ACCOUNT_JSON))
-            audio = speech.RecognitionAudio(uri=uri)
-            config = speech.RecognitionConfig(encoding=speech.RecognitionConfig.AudioEncoding.FLAC, language_code="en-US", enable_automatic_punctuation=True, use_enhanced=True, model="video", diarization_config=speech.SpeakerDiarizationConfig(enable_speaker_diarization=True, min_speaker_count=2, max_speaker_count=6))
-            op = client.long_running_recognize(config=config, audio=audio)
-            res = op.result(timeout=3600)
-            
-            transcript = ""
-            cur_spk = -1
-            for w in res.results[-1].alternatives[0].words:
-                if w.speaker_tag != cur_spk:
-                    cur_spk = w.speaker_tag
-                    transcript += f"\n\nSpeaker {cur_spk}: "
-                transcript += w.word + " "
-            
-        with st.spinner("Analyzing..."):
+        progress_bar.progress(100, text="Done!")
+        response = operation.result(timeout=3600)
+        progress_bar.empty()
+
+        if not response.results: return {"error": "Transcription failed."}
+
+        result = response.results[-1]
+        words = result.alternatives[0].words
+        full_transcript = ""
+        curr = -1
+        for w in words:
+            if w.speaker_tag != curr:
+                curr = w.speaker_tag
+                full_transcript += f"\n\nSpeaker {curr}: "
+            full_transcript += w.word + " "
+
+        with st.spinner("Analyzing with Gemini..."):
             prompt = f"""
-            Role: Expert Meeting Secretary.
-            Context: {participants}
-            Transcript: {transcript}
+            You are an expert meeting secretary. Context: {participants_context}
+            Transcript: {full_transcript}
             
-            Tasks:
+            TASKS:
             1. Identify speakers.
-            2. Create structured sections:
+            2. Extract Sections:
                ## OVERVIEW ##
-               [Brief summary of WHO met and WHAT was discussed - 2-3 sentences]
+               [Brief 2-3 sentence summary of who met and why.]
                
                ## DISCUSSION ##
                [Detailed bullet points with headers]
                
                ## NEXT STEPS ##
-               [Specific actions: * **Name**: Action - Deadline]
+               [Specific actions: * **Action:** [Task] (Assigned to: [Name]) - Deadline: [Time]]
                
                ## CLIENT REQUESTS ##
-               [Requests from client]
+               [Bullet points]
             """
-            resp = gemini_model.generate_content(prompt).text
+            text = gemini_model.generate_content(prompt).text
             
-            # Parsing
-            ov, disc, next_s, creq = "", "", "", ""
+            overview = ""
+            discussion = ""
+            next_steps = ""
+            client_reqs = ""
             try:
-                if "## OVERVIEW ##" in resp: ov = resp.split("## OVERVIEW ##")[1].split("## DISCUSSION ##")[0].strip()
-                if "## DISCUSSION ##" in resp: disc = resp.split("## DISCUSSION ##")[1].split("## NEXT STEPS ##")[0].strip()
-                if "## NEXT STEPS ##" in resp: next_s = resp.split("## NEXT STEPS ##")[1].split("## CLIENT REQUESTS ##")[0].strip()
-                if "## CLIENT REQUESTS ##" in resp: creq = resp.split("## CLIENT REQUESTS ##")[1].strip()
-            except: disc = resp
+                if "## OVERVIEW ##" in text: overview = text.split("## OVERVIEW ##")[1].split("## DISCUSSION ##")[0].strip()
+                if "## DISCUSSION ##" in text: discussion = text.split("## DISCUSSION ##")[1].split("## NEXT STEPS ##")[0].strip()
+                if "## NEXT STEPS ##" in text: next_steps = text.split("## NEXT STEPS ##")[1].split("## CLIENT REQUESTS ##")[0].strip()
+                if "## CLIENT REQUESTS ##" in text: client_reqs = text.split("## CLIENT REQUESTS ##")[1].strip()
+            except: discussion = text
 
-            return {"overview": ov, "discussion": disc, "next_steps": next_s, "client_reqs": creq, "full_transcript": transcript}
-            
+            return {"overview": overview, "discussion": discussion, "next_steps": next_steps, "client_reqs": client_reqs, "full_transcript": full_transcript}
     except Exception as e: return {"error": str(e)}
     finally:
-        try: storage_client.bucket(GCS_BUCKET_NAME).blob(f"{os.path.basename(path)}.flac").delete()
+        try: bucket = storage_client.bucket(GCS_BUCKET_NAME); bucket.blob(f"{os.path.splitext(file_name)[0]}.flac").delete()
         except: pass
+
+# --- Markdown Parsers ---
+def _add_rich_text(paragraph, text):
+    parts = re.split(r'(\*\*.*?\*\*)', text)
+    for part in parts:
+        if part.startswith('**') and part.endswith('**'):
+            run = paragraph.add_run(part[2:-2])
+            run.bold = True
+        else:
+            paragraph.add_run(part)
+
+def add_formatted_text(cell, text):
+    cell.text = ""
+    for line in text.split('\n'):
+        line = line.strip()
+        if not line: continue
+        p = cell.add_paragraph()
+        p.paragraph_format.space_after = Pt(2)
+        if line.startswith('##'):
+            run = p.add_run(line.lstrip('#').strip())
+            run.underline = True
+            run.bold = True
+            p.paragraph_format.space_before = Pt(8)
+        elif line.startswith('*') or line.startswith('-'):
+            clean = line.lstrip('*- ').strip()
+            p.style = 'List Bullet'
+            _add_rich_text(p, clean)
+        else:
+            _add_rich_text(p, line)
+
+def add_markdown_to_doc(doc, text):
+    lines = text.split('\n')
+    table_row = re.compile(r"^\|(.+)\|")
+    table_sep = re.compile(r"^\|[-:| ]+\|")
+    table_data = []
+    in_table = False
+
+    for line in lines:
+        stripped = line.strip()
+        if table_row.match(stripped):
+            if not table_sep.match(stripped):
+                table_data.append([c.strip() for c in stripped.strip('|').split('|')])
+            in_table = True
+            continue
+        elif in_table:
+            if table_data:
+                t = doc.add_table(rows=len(table_data), cols=max(len(r) for r in table_data))
+                t.style = 'Table Grid'
+                for i, row in enumerate(table_data):
+                    for j, val in enumerate(row):
+                        if j < len(t.rows[i].cells):
+                            p = t.rows[i].cells[j].paragraphs[0]
+                            _add_rich_text(p, val)
+                            if i == 0: 
+                                for run in p.runs: run.bold = True
+                doc.add_paragraph("")
+                table_data = []
+            in_table = False
+
+        if stripped.startswith('##'):
+            doc.add_heading(stripped.lstrip('#').strip(), level=2)
+        elif stripped.startswith('*') or stripped.startswith('-'):
+            p = doc.add_paragraph(style='List Bullet')
+            _add_rich_text(p, stripped.lstrip('*- ').strip())
+        elif stripped:
+            p = doc.add_paragraph()
+            _add_rich_text(p, stripped)
+    
+    if table_data: # Catch end of text table
+        t = doc.add_table(rows=len(table_data), cols=max(len(r) for r in table_data))
+        t.style = 'Table Grid'
+        for i, row in enumerate(table_data):
+            for j, val in enumerate(row):
+                if j < len(t.rows[i].cells):
+                    p = t.rows[i].cells[j].paragraphs[0]
+                    _add_rich_text(p, val)
+                    if i == 0: 
+                        for run in p.runs: run.bold = True
+
+# -----------------------------------------------------
+# 3. STATE & LOGIN
+# -----------------------------------------------------
+if 'gdrive_creds' not in st.session_state: st.session_state.gdrive_creds = None
+if 'basecamp_token' not in st.session_state: st.session_state.basecamp_token = None
+if 'user_real_name' not in st.session_state: st.session_state.user_real_name = ""
+if 'detected_date' not in st.session_state: st.session_state.detected_date = None
+if 'detected_time' not in st.session_state: st.session_state.detected_time = None
+if 'detected_title' not in st.session_state: st.session_state.detected_title = "Meeting_Minutes"
+if 'detected_venue' not in st.session_state: st.session_state.detected_venue = ""
+
+# Re-hydrate Google
+if 'gdrive_creds_json' in st.session_state and not st.session_state.gdrive_creds:
+    try: st.session_state.gdrive_creds = Credentials.from_authorized_user_info(json.loads(st.session_state.gdrive_creds_json))
+    except: st.session_state.gdrive_creds_json = None
+
+# Basecamp Auto-Login
+if AUTO_LOGIN_MODE and "code" in st.query_params and not st.session_state.basecamp_token:
+    try:
+        resp = requests.post(BASECAMP_TOKEN_URL, data={"type":"web_server","client_id":BASECAMP_CLIENT_ID,"client_secret":BASECAMP_CLIENT_SECRET,"redirect_uri":BASECAMP_REDIRECT_URI,"code":st.query_params["code"]})
+        resp.raise_for_status()
+        st.session_state.basecamp_token = resp.json()
+        st.session_state.user_real_name = fetch_basecamp_name(resp.json())
+        st.query_params.clear()
+        st.rerun()
+    except: st.error("Login failed.")
+
+# -----------------------------------------------------
+# 4. SIDEBAR
+# -----------------------------------------------------
+with st.sidebar:
+    st.title("🔐 Login")
+    st.markdown("### Step 1: Basecamp")
+    if st.session_state.basecamp_token:
+        st.success(f"✅ Connected: {st.session_state.user_real_name}")
+        if st.button("Logout Basecamp"):
+            st.session_state.basecamp_token = None; st.session_state.user_real_name = ""; st.rerun()
+    else:
+        bc = OAuth2Session(BASECAMP_CLIENT_ID, redirect_uri=BASECAMP_REDIRECT_URI)
+        url, _ = bc.authorization_url(BASECAMP_AUTH_URL, type="web_server")
+        if AUTO_LOGIN_MODE: st.link_button("Login to Basecamp", url, type="primary")
+        else: 
+            st.markdown(f"[Authorize]({url})"); c = st.text_input("Code")
+            if c: 
+                st.session_state.basecamp_token = requests.post(BASECAMP_TOKEN_URL, data={"type":"web_server","client_id":BASECAMP_CLIENT_ID,"client_secret":BASECAMP_CLIENT_SECRET,"redirect_uri":BASECAMP_REDIRECT_URI,"code":c}).json()
+                st.session_state.user_real_name = fetch_basecamp_name(st.session_state.basecamp_token)
+                st.rerun()
+
+    st.divider()
+    st.markdown("### Step 2: Google Drive")
+    if not st.session_state.basecamp_token: st.info("🔒 Login to Basecamp first.")
+    else:
+        if st.session_state.gdrive_creds:
+            st.success("✅ Connected")
+            if st.button("Logout Drive"):
+                st.session_state.gdrive_creds = None; st.session_state.gdrive_creds_json = None; st.rerun()
+        else:
+            f = Flow.from_client_config(GDRIVE_CLIENT_CONFIG, scopes=["https://www.googleapis.com/auth/drive"], redirect_uri="urn:ietf:wg:oauth:2.0:oob")
+            url, _ = f.authorization_url(prompt='consent')
+            st.link_button("Login to Drive", url)
+            c = st.text_input("Paste Drive Code")
+            if c:
+                f.fetch_token(code=c)
+                st.session_state.gdrive_creds = f.credentials
+                st.session_state.gdrive_creds_json = f.credentials.to_json()
+                st.rerun()
+
+if not (st.session_state.basecamp_token and st.session_state.gdrive_creds):
+    st.title("🔒 Access Restricted"); st.warning("Please log in to both services."); st.stop()
 
 # -----------------------------------------------------
 # 8. MAIN UI
 # -----------------------------------------------------
 if 'ai_results' not in st.session_state: st.session_state.ai_results = {}
 if 'chat_history' not in st.session_state: st.session_state.chat_history = []
-if 'saved_participants' not in st.session_state: st.session_state.saved_participants = ""
+if 'saved_participants_input' not in st.session_state: st.session_state.saved_participants_input = ""
 
 st.title("🤖 AI Meeting Manager")
-
 tab1, tab2, tab3, tab4 = st.tabs(["1. Analyze", "2. Review & Export", "3. Chat", "4. History"])
 
 with tab1:
-    st.header("1. Analyze")
-    participants = st.text_area("Participants", "Client (Client)\niFoundries (iFoundries)")
+    st.header("1. Analyze Audio")
+    participants = st.text_area("Known Participants", "Client (Client)\niFoundries (iFoundries)")
     up = st.file_uploader("Upload", type=['mp3','mp4','m4a','wav'])
-    
     if st.button("Analyze"):
         if up:
             with tempfile.NamedTemporaryFile(delete=False, suffix=f".{up.name.split('.')[-1]}") as tmp:
                 tmp.write(up.getvalue()); path = tmp.name
             
-            # 1. Get Metadata
+            st.session_state.chat_history = []
+            st.session_state.saved_participants_input = participants
+            
+            # Metadata
             with st.spinner("Extracting Metadata..."):
                 meta = get_visual_metadata(path)
-                st.session_state.detected_date = meta['datetime_sg'].date() if meta['datetime_sg'] else datetime.date.today()
-                
-                # Time Range logic
-                if meta['datetime_sg'] and meta['duration']:
+                if meta['datetime_sg']:
+                    st.session_state.detected_date = meta['datetime_sg'].date()
                     end = meta['datetime_sg'] + datetime.timedelta(seconds=meta['duration'])
                     st.session_state.detected_time = f"{meta['datetime_sg'].strftime('%I:%M %p')} - {end.strftime('%I:%M %p')}"
-                else: st.session_state.detected_time = "Unknown"
-                
-                st.session_state.detected_title = meta['title'] if meta['title'] else "Meeting"
-                st.session_state.detected_venue = meta['venue'] if meta['venue'] else ""
+                    if meta['title']: st.session_state.detected_title = meta['title']
+                    if meta['venue']: st.session_state.detected_venue = meta['venue']
             
-            # 2. Analyze
-            st.session_state.saved_participants = participants
-            res = analyze_audio_gemini(path, participants)
-            
+            # Analyze
+            res = get_structured_notes_google(path, up.name, participants)
             if "error" in res: st.error(res["error"])
             else:
                 st.session_state.ai_results = res
-                # Auto-Save to History (Include Chat History if any, usually empty here)
-                if st.session_state.gdrive_creds:
-                    save_data = {
-                        "ai_results": res, 
-                        "participants": participants, 
-                        "date": str(datetime.datetime.now()),
-                        "chat_history": [] # Init empty chat history
-                    }
-                    save_analysis_data_to_drive(save_data, f"Data_{up.name}_{datetime.datetime.now().strftime('%Y%m%d')}.json")
-                
-                # Auto-Fill Reps
-                cl = [l for l in participants.split('\n') if "(Client)" in l]
-                il = [l for l in participants.split('\n') if "(iFoundries)" in l]
-                st.session_state.crep = "\n".join(cl)
-                st.session_state.irep = "\n".join(il)
-                
-                st.success("Done! Go to Review tab.")
+                save_analysis_data_to_drive({"res": res, "parts": participants, "chat": [], "title": st.session_state.detected_title}, f"Data_{up.name}_{datetime.datetime.now().strftime('%Y%m%d')}.json")
+                st.success("Done! Check Review tab.")
 
 with tab2:
     st.header("2. Review")
-    # Defaults
-    d_date = st.session_state.get('detected_date', datetime.date.today())
-    d_time = st.session_state.get('detected_time', "")
-    d_venue = st.session_state.get('detected_venue', "")
+    d_date = st.session_state.detected_date if st.session_state.detected_date else datetime.date.today()
+    d_time = st.session_state.detected_time if st.session_state.detected_time else datetime.datetime.now().strftime("%I:%M %p")
     
     c1, c2 = st.columns(2)
     date = c1.date_input("Date", d_date)
-    venue = c1.text_input("Venue", d_venue)
-    crep = c1.text_input("Client Reps", st.session_state.get('crep',''))
+    venue = c1.text_input("Venue", st.session_state.detected_venue)
+    crep = c1.text_input("Client Reps")
     absent = c1.text_input("Absent")
     
     time_str = c2.text_input("Time", d_time)
     prep = c2.text_input("Prepared By", st.session_state.user_real_name)
-    irep = c2.text_input("iFoundries Reps", st.session_state.get('irep',''))
+    irep = c2.text_input("iFoundries Reps")
     
     st.subheader("Content")
-    overview = st.text_area("Overview", st.session_state.ai_results.get("overview", ""))
+    overview = st.text_area("Overview (Green Box)", st.session_state.ai_results.get("overview", ""))
     disc = st.text_area("Discussion", st.session_state.ai_results.get("discussion", ""), height=300)
-    next_s = st.text_area("Next Steps", st.session_state.ai_results.get("next_steps", ""), height=150)
+    next_s = st.text_area("Next Steps", st.session_state.ai_results.get("next_steps", ""), height=200)
     
     st.divider()
-    do_d = st.checkbox("Drive", True)
-    do_b = st.checkbox("Basecamp")
-    
-    pid, tool, tid, subid, btitle, bdesc = None, None, None, None, "", ""
+    do_d = st.checkbox("Upload to Drive", True)
+    do_b = st.checkbox("Upload to Basecamp", False)
     
     if do_b:
         sess = get_basecamp_session_user()
@@ -642,7 +552,7 @@ with tab2:
         pname = st.selectbox("Project", [p[0] for p in projs])
         if pname:
             pid = next(p[1] for p in projs if p[0]==pname)
-            tool = st.selectbox("Tool", ["To-dos", "Message Board", "Docs & Files"])
+            tool = st.selectbox("Where to post?", ["To-dos", "Message Board", "Docs & Files"])
             dock = get_project_tools(sess, pid)
             
             if tool == "To-dos":
@@ -651,25 +561,14 @@ with tab2:
                 lname = st.selectbox("List", [l[0] for l in lists])
                 if lname: subid = next(l[1] for l in lists if l[0]==lname)
                 btitle = st.text_input("Title", f"Minutes - {date}")
-                bdesc = st.text_area("Desc", "Attached.")
-            
-            elif tool == "Message Board":
-                tid = next((t['id'] for t in dock if t['name']=='message_board'), None)
-                btitle = st.text_input("Subject", f"Minutes - {date}")
-                bdesc = st.text_area("Body", "Attached.")
-                
-            elif tool == "Docs & Files":
-                tid = next((t['id'] for t in dock if t['name']=='vault'), None)
-                btitle = st.text_input("File Name", f"Minutes_{date}.docx")
-
-    if st.button("Generate"):
+                bbody = st.text_area("Description", "Attached.")
+    
+    if st.button("Generate Word Doc"):
         doc = Document("Minutes Of Meeting - Template.docx")
-        
-        # 1. Title Replace
+        # 1. Header
         for p in doc.paragraphs: 
-            if "[Title]" in p.text: p.text = p.text.replace("[Title]", st.session_state.get("detected_title", "Meeting"))
-            
-        # 2. Header Table
+            if "[Title]" in p.text: p.text = p.text.replace("[Title]", st.session_state.detected_title)
+        
         t = doc.tables[0]
         t.cell(1,1).text = str(date)
         t.cell(2,1).text = str(time_str)
@@ -678,13 +577,13 @@ with tab2:
         t.cell(4,2).text = irep
         t.cell(5,1).text = absent
         
-        # 3. Content Table
+        # 2. Content
         t2 = doc.tables[1]
-        t2.cell(1,1).text = overview # Overview in Green Box
+        t2.cell(1,1).text = overview # Green Box
         add_formatted_text(t2.cell(2,1), disc)
         add_formatted_text(t2.cell(4,1), next_s)
         
-        # 4. Adjourned Time
+        # 3. Adjourned
         try: end_t = time_str.split('-')[1].strip()
         except: end_t = "Unknown"
         t2.cell(5,1).text = f"Meeting adjourned at {end_t}"
@@ -692,78 +591,69 @@ with tab2:
         doc.paragraphs[-1].text = f"Prepared by: {prep}"
         
         b = io.BytesIO(); doc.save(b); b.seek(0)
-        fn = f"{st.session_state.get('detected_title','Minutes')}_{date}.docx"
+        fn = f"{st.session_state.detected_title}_{date}.docx"
         
         if do_d: upload_to_drive_user(b, fn, "Meeting Notes")
         if do_b and pid:
             sgid = upload_bc_attachment(sess, b.getvalue(), fn)
-            post_to_bc(sess, pid, tool, tid, subid, btitle, bdesc, sgid)
-            
+            post_to_basecamp(sess, pid, tool, tid, subid, btitle, bbody, sgid)
+        
         st.success("Done!")
+        st.download_button("Download", b, fn)
 
 with tab3:
-    st.header("Chat")
-    
-    # Save Chat Logic
+    st.header("💬 Chat")
+    # Chat Save Button
     if st.button("💾 Save Chat to Drive"):
         d = Document()
         d.add_heading(f"Chat Log - {datetime.date.today()}", 0)
         for m in st.session_state.chat_history:
             p = d.add_paragraph()
-            role = "AI" if m['role'] == 'assistant' else "User"
+            role = "AI" if m['role']=='assistant' else "User"
             p.add_run(f"{role}: ").bold = True
-            add_markdown_to_doc(d, m['content']) # Smart Markdown Parsing
+            add_markdown_to_doc(d, m['content'])
             d.add_paragraph("_"*30)
-        
         b = io.BytesIO(); d.save(b); b.seek(0)
-        upload_to_drive_user(b, f"Chat_{st.session_state.get('detected_title','Log')}.docx", "Chats")
+        upload_to_drive_user(b, f"Chat_{st.session_state.detected_title}.docx", "Chats")
         st.success("Saved!")
 
-    # Chat Loop
-    for m in st.session_state.chat_history:
-        st.chat_message(m["role"]).markdown(m["content"])
-        
-    if p := st.chat_input():
+    # Chat Box
+    box = st.container(height=500)
+    with box:
+        for m in st.session_state.chat_history:
+            st.chat_message(m["role"], avatar="👤" if m["role"]=="user" else "🤖").markdown(m["content"])
+    
+    if p := st.chat_input("Ask a question..."):
         st.session_state.chat_history.append({"role":"user", "content":p})
-        st.chat_message("user").markdown(p)
+        box.chat_message("user", avatar="👤").markdown(p)
         
-        with st.chat_message("assistant"):
-            # Stream logic
-            def str_gen():
+        with box.chat_message("assistant", avatar="🤖"):
+            with st.spinner("Thinking..."):
                 prompt = f"""
-                Context: {st.session_state.saved_participants}
+                Role: Secretary.
+                Context: {st.session_state.saved_participants_input}
                 Transcript: {st.session_state.ai_results.get('full_transcript','')}
                 Question: {p}
-                Rules: Be professional. Use names. Be concise.
+                Rules: Professional voice. Use real names. Concise.
                 """
-                for chunk in gemini_model.generate_content(prompt, stream=True):
-                    if chunk.text: yield chunk.text
-            
-            full_resp = st.write_stream(str_gen())
-            st.session_state.chat_history.append({"role":"assistant", "content":full_resp})
+                resp = gemini_model.generate_content(prompt).text
+                st.markdown(resp)
+                st.session_state.chat_history.append({"role":"assistant", "content":resp})
 
 with tab4:
-    st.header("History")
+    st.header("📂 History")
     if st.button("Refresh"): st.rerun()
-    
     files = list_past_meetings()
     if files:
         sel = st.selectbox("Select Meeting", [f['name'] for f in files])
         if st.button("Load"):
             fid = next(f['id'] for f in files if f['name'] == sel)
-            data = load_meeting_data(fid)
-            if data:
-                st.session_state.ai_results = data.get("ai_results", {})
-                st.session_state.saved_participants_input = data.get("participants", "")
-                
-                # RESTORE CHAT HISTORY
-                st.session_state.chat_history = data.get("chat_history", [])
-                
-                # Restore Reps
-                p_input = data.get("participants", "")
-                c_list = [l.replace("(Client)","").strip() for l in p_input.split('\n') if "(Client)" in l]
-                i_list = [l.replace("(iFoundries)","").strip() for l in p_input.split('\n') if "(iFoundries)" in l]
-                st.session_state.auto_client_reps = "\n".join(c_list)
-                st.session_state.auto_ifoundries_reps = ", ".join(i_list)
-                
-                st.success("Loaded! Check Tab 2 and 3.")
+            d = load_meeting_data(fid)
+            if d:
+                st.session_state.ai_results = d.get("res", {})
+                st.session_state.saved_participants_input = d.get("parts", "")
+                st.session_state.chat_history = d.get("chat", [])
+                st.session_state.detected_title = d.get("title", "Meeting")
+                st.success("Loaded!")
+                time.sleep(1)
+                st.rerun()
