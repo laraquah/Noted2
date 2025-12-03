@@ -1,7 +1,7 @@
 import streamlit as st
 import streamlit.components.v1 as components
 import os
-import shutil
+import shutil # Required for checking ffmpeg
 
 # --- FIX: ALLOW OAUTH TO RUN ON STREAMLIT CLOUD ---
 os.environ['OAUTHLIB_INSECURE_TRANSPORT'] = '1'
@@ -99,11 +99,6 @@ if 'basecamp_token' not in st.session_state:
     st.session_state.basecamp_token = None
 if 'user_real_name' not in st.session_state:
     st.session_state.user_real_name = ""
-# --- METADATA STATE ---
-if 'detected_date' not in st.session_state:
-    st.session_state.detected_date = None
-if 'detected_time' not in st.session_state:
-    st.session_state.detected_time = None
 
 # --- FIX: IMMEDIATE GOOGLE RE-LOGIN ---
 if 'gdrive_creds_json' in st.session_state and st.session_state.gdrive_creds_json and not st.session_state.gdrive_creds:
@@ -319,45 +314,75 @@ def _add_rich_text(paragraph, text):
         else:
             paragraph.add_run(part)
 
-# --- METADATA EXTRACTION HELPER ---
-def get_video_metadata(file_path):
-    """Extracts creation_time using ffprobe."""
-    # Check if ffprobe is installed/available
-    if shutil.which("ffprobe") is None:
-        return None
+# --- AI VISUAL TIMESTAMP EXTRACTION ---
+def get_visual_timestamp_and_duration(file_path):
+    """
+    1. Uses Gemini Vision to read timestamp from the first frame.
+    2. Uses ffprobe to get the total duration of the meeting.
+    Returns: (start_datetime_sg, duration_seconds)
+    """
+    if shutil.which("ffmpeg") is None: return None, 0
+    
+    thumbnail_path = "temp_thumb.jpg"
+    duration_seconds = 0
+    dt_sg = None
 
     try:
-        command = [
-            "ffprobe", "-v", "quiet", "-print_format", "json", 
-            "-show_format", "-show_streams", file_path
-        ]
+        # A. Get Duration using ffprobe
+        command = ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", file_path]
         result = subprocess.run(command, capture_output=True, text=True)
-        if result.returncode != 0: return None 
-        
-        data = json.loads(result.stdout)
-        
-        # Try finding creation_time in different places
-        creation_time_str = data.get('format', {}).get('tags', {}).get('creation_time')
-        
-        if not creation_time_str:
-            for stream in data.get('streams', []):
-                creation_time_str = stream.get('tags', {}).get('creation_time')
-                if creation_time_str: break
-        
-        if creation_time_str:
-            # Parse UTC (ISO 8601) - Handles milliseconds if present
-            # Clean string (remove Z if present)
-            clean_time = creation_time_str.split('.')[0].rstrip('Z')
-            dt_utc = datetime.datetime.strptime(clean_time, "%Y-%m-%dT%H:%M:%S")
-            dt_utc = dt_utc.replace(tzinfo=datetime.timezone.utc)
+        if result.returncode == 0:
+            try:
+                duration_seconds = float(result.stdout.strip())
+            except: pass
+
+        # B. Get Start Time using Vision
+        # Extract 1st second frame
+        subprocess.run([
+            'ffmpeg', '-i', file_path, '-ss', '00:00:01', 
+            '-vframes', '1', '-q:v', '2', '-y', thumbnail_path
+        ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+        if os.path.exists(thumbnail_path):
+            # Send to Gemini
+            vision_model = genai.GenerativeModel('gemini-2.5-flash-lite')
             
-            # Convert to SG Time
-            sg_tz = pytz.timezone('Asia/Singapore')
-            dt_sg = dt_utc.astimezone(sg_tz)
-            return dt_sg
-    except Exception:
-        return None
-    return None
+            with open(thumbnail_path, "rb") as img_file:
+                img_data = img_file.read()
+
+            prompt = """
+            Look at this image. It is a screenshot from a video meeting.
+            Extract the Date and Time visible on the screen (e.g. '2025-09-12 13:34 UTC').
+            Return ONLY the date and time in this ISO format: YYYY-MM-DD HH:MM.
+            If no date/time is visible, return 'None'.
+            """
+            
+            response = vision_model.generate_content([
+                {'mime_type': 'image/jpeg', 'data': img_data}, 
+                prompt
+            ])
+            
+            text = response.text.strip()
+            
+            if "None" not in text and len(text) > 5:
+                # Parse simple ISO
+                try:
+                    dt_obj = datetime.datetime.strptime(text, "%Y-%m-%d %H:%M")
+                    # Assume UTC as meetings usually stamp UTC
+                    dt_obj = dt_obj.replace(tzinfo=datetime.timezone.utc)
+                    
+                    # Convert to SG
+                    sg_tz = pytz.timezone('Asia/Singapore')
+                    dt_sg = dt_obj.astimezone(sg_tz)
+                except:
+                    dt_sg = None
+    except Exception as e:
+        print(f"Visual Metadata Error: {e}")
+    finally:
+        if os.path.exists(thumbnail_path):
+            os.remove(thumbnail_path)
+            
+    return dt_sg, duration_seconds
 
 # --- Standard Helpers ---
 
@@ -687,14 +712,23 @@ with tab1:
             st.session_state.chat_history = [] 
             st.session_state.saved_participants_input = participants_input 
             
-            # --- METADATA EXTRACTION ---
-            real_start_time = get_video_metadata(path)
+            # --- NEW: VISUAL TIMESTAMP & DURATION ---
+            with st.spinner("🕵️‍♀️ Detecting meeting time from screen & duration..."):
+                real_start_time, duration_secs = get_visual_timestamp_and_duration(path)
+                
             if real_start_time:
                 st.session_state.detected_date = real_start_time.date()
-                st.session_state.detected_time = real_start_time.strftime("%I:%M %p")
-                st.toast(f"📅 Found Meeting Date: {st.session_state.detected_date}")
+                
+                # Calculate End Time
+                end_time = real_start_time + datetime.timedelta(seconds=duration_secs)
+                
+                # Format: 2:00 PM - 3:30 PM
+                time_str = f"{real_start_time.strftime('%I:%M %p')} - {end_time.strftime('%I:%M %p')}"
+                st.session_state.detected_time = time_str
+                
+                st.toast(f"📅 Found Meeting: {st.session_state.detected_date} ({time_str})")
             else:
-                st.toast("⚠️ No timestamp found in file. Using today's date.")
+                st.toast("⚠️ No visual timestamp found. Using today's date.")
 
             c_list = [l.replace("(Client)","").strip() for l in participants_input.split('\n') if "(Client)" in l]
             i_list = [l.replace("(iFoundries)","").strip() for l in participants_input.split('\n') if "(iFoundries)" in l]
