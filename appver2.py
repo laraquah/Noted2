@@ -98,6 +98,11 @@ if 'basecamp_token' not in st.session_state:
     st.session_state.basecamp_token = None
 if 'user_real_name' not in st.session_state:
     st.session_state.user_real_name = ""
+# --- NEW: METADATA STATE ---
+if 'detected_date' not in st.session_state:
+    st.session_state.detected_date = None
+if 'detected_time' not in st.session_state:
+    st.session_state.detected_time = None
 
 # --- FIX: IMMEDIATE GOOGLE RE-LOGIN ---
 if 'gdrive_creds_json' in st.session_state and st.session_state.gdrive_creds_json and not st.session_state.gdrive_creds:
@@ -159,9 +164,9 @@ with st.sidebar:
         bc_auth_url, _ = bc_oauth.authorization_url(BASECAMP_AUTH_URL, type="web_server")
         
         if AUTO_LOGIN_MODE:
-            # --- USE NATIVE LINK BUTTON (RELIABLE) ---
+            # Use native button for reliability
             st.link_button("Login to Basecamp", bc_auth_url, type="primary")
-            st.caption("Opens in a new tab. Please close it after login.")
+            st.caption("Opens in a new tab. Close it after logging in.")
         else:
             st.warning("Auto-login not configured in Secrets.")
             st.markdown(f"👉 [**Authorize Basecamp**]({bc_auth_url})")
@@ -312,6 +317,41 @@ def _add_rich_text(paragraph, text):
             run.bold = True
         else:
             paragraph.add_run(part)
+
+# --- METADATA EXTRACTION HELPER ---
+def get_video_metadata(file_path):
+    """Extracts creation_time using ffprobe."""
+    try:
+        command = [
+            "ffprobe", "-v", "quiet", "-print_format", "json", 
+            "-show_format", "-show_streams", file_path
+        ]
+        result = subprocess.run(command, capture_output=True, text=True)
+        data = json.loads(result.stdout)
+        
+        # Find creation_time tag
+        tags = data.get('format', {}).get('tags', {})
+        creation_time_str = tags.get('creation_time')
+        
+        if not creation_time_str:
+            for stream in data.get('streams', []):
+                stream_tags = stream.get('tags', {})
+                if 'creation_time' in stream_tags:
+                    creation_time_str = stream_tags['creation_time']
+                    break
+        
+        if creation_time_str:
+            # Parse UTC (ISO 8601)
+            dt_utc = datetime.datetime.strptime(creation_time_str.split('.')[0], "%Y-%m-%dT%H:%M:%S")
+            dt_utc = dt_utc.replace(tzinfo=datetime.timezone.utc)
+            
+            # Convert to SG Time
+            sg_tz = pytz.timezone('Asia/Singapore')
+            dt_sg = dt_utc.astimezone(sg_tz)
+            return dt_sg
+    except Exception:
+        return None
+    return None
 
 # --- Standard Helpers ---
 
@@ -571,6 +611,7 @@ def get_structured_notes_google(audio_file_path, file_name, participants_context
         except: pass
 
 def add_formatted_text(cell, text):
+    """Original simple parser for main doc."""
     cell.text = ""
     lines = text.split('\n')
     for line in lines:
@@ -636,6 +677,15 @@ with tab1:
             st.session_state.chat_history = [] 
             st.session_state.saved_participants_input = participants_input 
             
+            # --- METADATA EXTRACTION ---
+            real_start_time = get_video_metadata(path)
+            if real_start_time:
+                st.session_state.detected_date = real_start_time.date()
+                st.session_state.detected_time = real_start_time.strftime("%I:%M %p")
+                st.toast(f"📅 Found Meeting Date: {st.session_state.detected_date}")
+            else:
+                st.toast("⚠️ No timestamp found in file. Using today's date.")
+
             c_list = [l.replace("(Client)","").strip() for l in participants_input.split('\n') if "(Client)" in l]
             i_list = [l.replace("(iFoundries)","").strip() for l in participants_input.split('\n') if "(iFoundries)" in l]
             st.session_state.auto_client_reps = "\n".join(c_list)
@@ -667,14 +717,18 @@ with tab2:
     sg_tz = pytz.timezone('Asia/Singapore')
     sg_now = datetime.datetime.now(sg_tz)
     
+    # Use detected date/time if available, otherwise current time
+    default_date = st.session_state.get("detected_date", sg_now.date())
+    default_time = st.session_state.get("detected_time", sg_now.strftime("%I:%M %p"))
+
     row1, row2 = st.columns(2)
     with row1:
-        date_obj = st.date_input("Date", sg_now.date())
+        date_obj = st.date_input("Date", default_date)
         venue = st.text_input("Venue")
         client_rep = st.text_area("Client Reps", value=st.session_state.auto_client_reps)
         absent = st.text_input("Absent")
     with row2:
-        time_obj = st.text_input("Time", value=sg_now.strftime("%I:%M %p"))
+        time_obj = st.text_input("Time", value=default_time)
         default_prepared_by = st.session_state.user_real_name if st.session_state.user_real_name else st.session_state.auto_ifoundries_reps
         prepared_by = st.text_input("Prepared by", value=default_prepared_by)
         ifoundries_rep = st.text_input("iFoundries Reps", value=st.session_state.auto_ifoundries_reps)
