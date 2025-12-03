@@ -48,27 +48,26 @@ This app requires significant setup in the Google Cloud Console and Basecamp to 
 1. Google Cloud Platform (GCP) Setup
   1. Create a Project: Go to console.cloud.google.com and create a new project.
   2. Enable APIs: Go to "APIs & Services" > "Library" and enable these four APIs:
-    - Cloud Speech-to-Text API
-    - Google Cloud Storage JSON API
-    - Google Drive API
-    - Generative Language API (for Gemini)
-  3. Create Service Account (For Robot Backend):
-    - Go to "IAM & Admin" > "Service Accounts" > "Create Service Account".
-    - Grant it the role: **Owner** (or Storage Admin + Speech Admin).
-    - Click on the created account > **Keys** > **Add Key** > **Create new key (JSON)**.
-      - *Save this file. You will copy its contents into your secrets later.*
-  4. Create OAuth Client (For User Login):
-    - Go to "APIs & Services" > "Credentials" > "Create Credentials" > OAuth client ID.
-    - **Application Type:** Web application.
-    - **Authorized redirect URIs:** Add your deployed Streamlit URL exactly (no trailing slash):
-      ```
+- Cloud Speech-to-Text APIGoogle Cloud Storage JSON API
+- Google Drive API
+- Generative Language API (for Gemini)
+  4. Create Service Account (For Robot Backend):
+- Go to "IAM & Admin" > "Service Accounts" > "Create Service Account".
+- Grant it the role: **Owner** (or Storage Admin + Speech Admin).
+- Click on the created account > **Keys** > **Add Key** > **Create new key (JSON)**.
+   - *Save this file. You will copy its contents into your secrets later.*
+  5. Create OAuth Client (For User Login):
+     - Go to "APIs & Services" > "Credentials" > "Create Credentials" > OAuth client ID.
+     - **Application Type:** Web application.
+     - **Authorized redirect URIs:** Add your deployed Streamlit URL exactly (no trailing slash):
+     ```
       https://your-app-name.streamlit.app
       ```
-      - *Download the JSON. You will copy specific values from this later.*
+     - *Download the JSON. You will copy specific values from this later.*
   6. Configure Consent Screen:
-    - Go to "OAuth consent screen".
-    - Set User Type to **External** (unless you have a Workspace organization).
-    - Add your email as a Test User.
+- Go to "OAuth consent screen".
+- Set User Type to **External** (unless you have a Workspace organization).
+- Add your email as a Test User.
 
 2. Basecamp Setup
   1. Go to launchpad.37signals.com/integrations.
