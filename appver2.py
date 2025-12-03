@@ -98,6 +98,11 @@ if 'basecamp_token' not in st.session_state:
     st.session_state.basecamp_token = None
 if 'user_real_name' not in st.session_state:
     st.session_state.user_real_name = ""
+# --- METADATA STATE ---
+if 'detected_date' not in st.session_state:
+    st.session_state.detected_date = None
+if 'detected_time' not in st.session_state:
+    st.session_state.detected_time = None
 
 # --- FIX: IMMEDIATE GOOGLE RE-LOGIN ---
 if 'gdrive_creds_json' in st.session_state and st.session_state.gdrive_creds_json and not st.session_state.gdrive_creds:
@@ -252,13 +257,11 @@ def add_markdown_to_doc(doc, text):
     lines = text.split('\n')
     table_row_pattern = re.compile(r"^\|(.+)\|")
     table_sep_pattern = re.compile(r"^\|[-:| ]+\|")
-    
     table_data = []
     in_table = False
 
     for line in lines:
         stripped = line.strip()
-        
         if table_row_pattern.match(stripped):
             if not table_sep_pattern.match(stripped):
                 cells = [c.strip() for c in stripped.strip('|').split('|')]
@@ -324,9 +327,9 @@ def get_video_metadata(file_path):
             "-show_format", "-show_streams", file_path
         ]
         result = subprocess.run(command, capture_output=True, text=True)
-        data = json.loads(result.stdout)
+        if result.returncode != 0: return None 
         
-        # Find creation_time tag
+        data = json.loads(result.stdout)
         tags = data.get('format', {}).get('tags', {})
         creation_time_str = tags.get('creation_time')
         
@@ -338,11 +341,8 @@ def get_video_metadata(file_path):
                     break
         
         if creation_time_str:
-            # Parse UTC (ISO 8601)
             dt_utc = datetime.datetime.strptime(creation_time_str.split('.')[0], "%Y-%m-%dT%H:%M:%S")
             dt_utc = dt_utc.replace(tzinfo=datetime.timezone.utc)
-            
-            # Convert to SG Time
             sg_tz = pytz.timezone('Asia/Singapore')
             dt_sg = dt_utc.astimezone(sg_tz)
             return dt_sg
@@ -608,7 +608,6 @@ def get_structured_notes_google(audio_file_path, file_name, participants_context
         except: pass
 
 def add_formatted_text(cell, text):
-    """Original simple parser for main doc."""
     cell.text = ""
     lines = text.split('\n')
     for line in lines:
@@ -651,7 +650,7 @@ if "auto_ifoundries_reps" not in st.session_state:
     st.session_state.auto_ifoundries_reps = ""
 if "saved_participants_input" not in st.session_state:
     st.session_state.saved_participants_input = ""
-# --- NEW: METADATA STATE ---
+# --- METADATA STATE ---
 if 'detected_date' not in st.session_state:
     st.session_state.detected_date = None
 if 'detected_time' not in st.session_state:
@@ -720,12 +719,8 @@ with tab2:
     sg_now = datetime.datetime.now(sg_tz)
     
     # Use detected date/time if available, otherwise current time
-    default_date = st.session_state.get("detected_date", sg_now.date())
-    default_time = st.session_state.get("detected_time", sg_now.strftime("%I:%M %p"))
-    
-    # Ensure we have a valid date object before calling date_input
-    if default_date is None:
-        default_date = sg_now.date()
+    default_date = st.session_state.detected_date if st.session_state.detected_date else sg_now.date()
+    default_time = st.session_state.detected_time if st.session_state.detected_time else sg_now.strftime("%I:%M %p")
 
     row1, row2 = st.columns(2)
     with row1:
@@ -739,7 +734,7 @@ with tab2:
         prepared_by = st.text_input("Prepared by", value=default_prepared_by)
         ifoundries_rep = st.text_input("iFoundries Reps", value=st.session_state.auto_ifoundries_reps)
     
-    date_str = date_obj.strftime("%d %B %Y") if date_obj else ""
+    date_str = date_obj.strftime("%d %B %Y")
     time_str = time_obj
     
     discussion_text = st.text_area("Discussion", value=st.session_state.ai_results.get("discussion", ""), height=300)
