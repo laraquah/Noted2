@@ -298,7 +298,7 @@ def get_structured_notes_google(audio_file_path, file_name, participants_context
             full_transcript += w.word + " "
 
         with st.spinner("Analyzing with Gemini..."):
-            # --- UPDATED PROMPT FOR ROBUST EXTRACTION ---
+            # --- ROBUST PROMPT TO FORCE CONTENT INTO FIELDS ---
             prompt = f"""
             You are an expert meeting secretary. Context: {participants_context}
             Transcript: {full_transcript}
@@ -311,7 +311,7 @@ def get_structured_notes_google(audio_file_path, file_name, participants_context
             [Brief summary of WHO met and WHAT was discussed (2-3 sentences).]
             
             ## DISCUSSION ##
-            [Detailed bullet points with headers]
+            [Detailed bullet points with headers. Be comprehensive.]
             
             ## NEXT STEPS ##
             List ALL specific, actionable items. **CRITICAL: Take any specific requests made by the Client and convert them into Action Items here.**
@@ -326,21 +326,17 @@ def get_structured_notes_google(audio_file_path, file_name, participants_context
             next_steps = ""
             
             try:
-                # Extract Overview (Look for ## OVERVIEW ## ... ## DISCUSSION ##)
+                # Regex handles varying capitalization or spaces
                 ov_match = re.search(r'##\s*OVERVIEW\s*##(.*?)(?=##\s*DISCUSSION|##\s*NEXT STEPS|$)', text, re.DOTALL | re.IGNORECASE)
-                if ov_match: overview = ov_match.group(1).strip()
-                
-                # Extract Discussion (Look for ## DISCUSSION ## ... ## NEXT STEPS ##)
                 disc_match = re.search(r'##\s*DISCUSSION\s*##(.*?)(?=##\s*NEXT STEPS|$)', text, re.DOTALL | re.IGNORECASE)
-                if disc_match: discussion = disc_match.group(1).strip()
-                
-                # Extract Next Steps (Look for ## NEXT STEPS ## ... End)
                 ns_match = re.search(r'##\s*NEXT STEPS\s*##(.*)', text, re.DOTALL | re.IGNORECASE)
-                if ns_match: next_steps = ns_match.group(1).strip()
                 
-                # Fallback if regex fails completely
-                if not overview and not discussion:
-                    discussion = text # Dump everything so user sees something
+                if ov_match: overview = ov_match.group(1).strip()
+                if disc_match: discussion = disc_match.group(1).strip()
+                if ns_match: next_steps = ns_match.group(1).strip()
+
+                # Safety Fallback
+                if not overview and not discussion: discussion = text
             except: 
                 discussion = text
 
@@ -383,7 +379,7 @@ def add_formatted_text(cell, text):
             p.paragraph_format.space_before = Pt(8)
         elif line.startswith('*') or line.startswith('-'):
             clean_text = line.lstrip('*- ').strip()
-            safe_apply_style(p, 'List Bullet', "• ")
+            safe_apply_style(p, 'List Bullet', "• ") 
             _add_rich_text(p, clean_text)
             p.paragraph_format.left_indent = Inches(0.15)
         else:
@@ -456,38 +452,62 @@ if 'gdrive_creds_json' in st.session_state and not st.session_state.gdrive_creds
     try: st.session_state.gdrive_creds = Credentials.from_authorized_user_info(json.loads(st.session_state.gdrive_creds_json))
     except: st.session_state.gdrive_creds_json = None
 
-# Basecamp Auto-Login
-if AUTO_LOGIN_MODE and "code" in st.query_params and not st.session_state.basecamp_token:
+# --- UNIFIED AUTO-LOGIN HANDLER ---
+if "code" in st.query_params:
     auth_code = st.query_params["code"]
-    try:
-        payload = {
-            "type": "web_server",
-            "client_id": BASECAMP_CLIENT_ID,
-            "client_secret": BASECAMP_CLIENT_SECRET,
-            "redirect_uri": BASECAMP_REDIRECT_URI,
-            "code": auth_code
-        }
-        response = requests.post(BASECAMP_TOKEN_URL, data=payload)
-        if response.status_code != 200:
-            st.error(f"Basecamp Login Error ({response.status_code}): {response.text}")
-        else:
-            token = response.json()
-            st.session_state.basecamp_token = token
-            real_name = fetch_basecamp_name(token)
-            if real_name: st.session_state.user_real_name = real_name
-            st.toast("✅ Basecamp Login Successful!", icon="🎉")
+    auth_state = st.query_params.get("state", "basecamp") 
+    
+    # 1. GOOGLE DRIVE LOGIN
+    if auth_state == "google" and not st.session_state.gdrive_creds:
+        try:
+            flow = Flow.from_client_config(
+                GDRIVE_CLIENT_CONFIG,
+                scopes=["https://www.googleapis.com/auth/drive"],
+                redirect_uri=BASECAMP_REDIRECT_URI
+            )
+            flow.fetch_token(code=auth_code)
+            st.session_state.gdrive_creds = flow.credentials
+            st.session_state.gdrive_creds_json = flow.credentials.to_json()
+            st.toast("✅ Drive Connected!")
             st.query_params.clear()
             time.sleep(1)
             st.rerun()
-    except Exception as e:
-        st.error(f"Auto-login system error: {e}")
+        except Exception as e:
+            st.error(f"Drive Login Error: {e}")
+
+    # 2. BASECAMP LOGIN (Default)
+    elif not st.session_state.basecamp_token:
+        try:
+            payload = {
+                "type": "web_server",
+                "client_id": BASECAMP_CLIENT_ID,
+                "client_secret": BASECAMP_CLIENT_SECRET,
+                "redirect_uri": BASECAMP_REDIRECT_URI,
+                "code": auth_code
+            }
+            response = requests.post(BASECAMP_TOKEN_URL, data=payload)
+            if response.status_code == 200:
+                token = response.json()
+                st.session_state.basecamp_token = token
+                real_name = fetch_basecamp_name(token)
+                if real_name: st.session_state.user_real_name = real_name
+                st.toast("✅ Basecamp Connected!")
+                st.query_params.clear()
+                time.sleep(1)
+                st.rerun()
+            else:
+                st.error(f"Basecamp Error: {response.text}")
+        except Exception as e:
+            st.error(f"Login Error: {e}")
 
 # -----------------------------------------------------
 # 4. SIDEBAR
 # -----------------------------------------------------
 with st.sidebar:
     st.title("🔐 Login")
-    st.markdown("### Step 1: Basecamp")
+    
+    # BASECAMP
+    st.markdown("### 1. Basecamp")
     if st.session_state.basecamp_token:
         st.success(f"✅ Connected: {st.session_state.user_real_name}")
         if st.button("Logout Basecamp"):
@@ -495,32 +515,28 @@ with st.sidebar:
     else:
         bc = OAuth2Session(BASECAMP_CLIENT_ID, redirect_uri=BASECAMP_REDIRECT_URI)
         url, _ = bc.authorization_url(BASECAMP_AUTH_URL, type="web_server")
-        if AUTO_LOGIN_MODE: st.link_button("Login to Basecamp", url, type="primary")
-        else: 
-            st.markdown(f"[Authorize]({url})"); c = st.text_input("Code")
-            if c: 
-                st.session_state.basecamp_token = requests.post(BASECAMP_TOKEN_URL, data={"type":"web_server","client_id":BASECAMP_CLIENT_ID,"client_secret":BASECAMP_CLIENT_SECRET,"redirect_uri":BASECAMP_REDIRECT_URI,"code":c}).json()
-                st.session_state.user_real_name = fetch_basecamp_name(st.session_state.basecamp_token)
-                st.rerun()
+        st.link_button("Login Basecamp", url, type="primary")
 
     st.divider()
-    st.markdown("### Step 2: Google Drive")
-    if not st.session_state.basecamp_token: st.info("Please login to Basecamp first.")
+
+    # GOOGLE DRIVE
+    st.markdown("### 2. Google Drive")
+    if not st.session_state.basecamp_token: 
+        st.info("Complete Step 1 first.")
     else:
         if st.session_state.gdrive_creds:
             st.success("✅ Connected")
             if st.button("Logout Drive"):
                 st.session_state.gdrive_creds = None; st.session_state.gdrive_creds_json = None; st.rerun()
         else:
-            f = Flow.from_client_config(GDRIVE_CLIENT_CONFIG, scopes=["https://www.googleapis.com/auth/drive"], redirect_uri="urn:ietf:wg:oauth:2.0:oob")
-            url, _ = f.authorization_url(prompt='consent')
-            st.link_button("Login to Drive", url)
-            c = st.text_input("Paste Drive Code")
-            if c:
-                f.fetch_token(code=c)
-                st.session_state.gdrive_creds = f.credentials
-                st.session_state.gdrive_creds_json = f.credentials.to_json()
-                st.rerun()
+            # Use 'state=google' to distinguish the callback
+            f = Flow.from_client_config(
+                GDRIVE_CLIENT_CONFIG, 
+                scopes=["https://www.googleapis.com/auth/drive"], 
+                redirect_uri=BASECAMP_REDIRECT_URI
+            )
+            url, _ = f.authorization_url(prompt='consent', state='google')
+            st.link_button("Login Drive", url, type="primary")
 
 if not (st.session_state.basecamp_token and st.session_state.gdrive_creds):
     st.title("🔒 Access Restricted"); st.warning("Please login to both services."); st.stop()
@@ -614,7 +630,7 @@ with tab2:
         pname = st.selectbox("Project", [p[0] for p in projs])
         if pname:
             pid = next(p[1] for p in projs if p[0]==pname)
-            tool = st.selectbox("Where to post?", ["To-dos", "Message Board", "Docs"])
+            tool = st.selectbox("Where to post?", ["To-dos", "Message Board", "Docs & Files"])
             dock = get_project_tools(sess, pid)
             
             if tool == "To-dos":
@@ -641,7 +657,7 @@ with tab2:
         t.cell(2,1).text = str(time_str)
         t.cell(3,1).text = venue
         
-        # Force correct format: Name (Client) / Name (iFoundries)
+        # Force correct format
         crep_final = crep if "(Client)" in crep else f"{crep} (Client)"
         irep_final = irep if "(iFoundries)" in irep else f"{irep} (iFoundries)"
         
